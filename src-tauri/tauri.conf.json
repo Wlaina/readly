@@ -1,0 +1,81 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Readly",
+  "version": "0.8.2",
+  "identifier": "com.readly.reader",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Readly",
+        "width": 1180,
+        "height": 800,
+        "minWidth": 360,
+        "minHeight": 480,
+        "dragDropEnabled": false,
+        "backgroundColor": "#f5f4ed",
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "fileAssociations": [
+      {
+        "ext": [
+          "epub"
+        ],
+        "name": "Readly.EPUB",
+        "description": "EPUB 电子书",
+        "mimeType": "application/epub+zip",
+        "role": "Viewer"
+      }
+    ],
+    "publisher": "Readly",
+    "shortDescription": "轻量电子书阅读器",
+    "windows": {
+      "nsis": {
+        "languages": [
+          "SimpChinese"
+        ],
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
+        "installerHooks": "./windows/hooks.nsh",
+        "template": "./windows/installer.nsi",
+        "headerImage": "./windows/installer-header.bmp",
+        "sidebarImage": "./windows/installer-sidebar.bmp"
+      }
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkwOUEyMkI1MDA2RDdDNTcKUldSWGZHMEF0U0tha0t0enhicFY0VldOZEVISlJHU2VnTmJDVFlsTldHdndJZVZod1JzWWNGKzAK",
+      "endpoints": [
+        "https://github.com/Wlaina/readly-releases/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

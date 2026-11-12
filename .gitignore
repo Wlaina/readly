@@ -1,0 +1,22 @@
+node_modules
+dist
+*.log
+src-tauri/target
+src-tauri/gen/schemas
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+public/dev-samples
+keystore
+release
+
+# ---- 开源仓库不收录的本机文件 ----
+# 本机备份、旧图标
+backup
+# 编译缓存
+*.tsbuildinfo
+# AI 助手的本机配置与交接笔记
+.claude
+HANDOFF.md
+# Anthropic 专有字体：不在公开仓库里分发（没有这些文件时界面会自动退回到系统字体）
+public/fonts/Anthropic*

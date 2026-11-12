@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="cover" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e0805f"/>
+      <stop offset="1" stop-color="#c25e3c"/>
+    </linearGradient>
+    <linearGradient id="pageL" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#fbf7ee"/>
+      <stop offset=".78" stop-color="#f6efe0"/>
+      <stop offset="1" stop-color="#e3d5bc"/>
+    </linearGradient>
+    <linearGradient id="pageR" x1="1" y1="0" x2="0" y2="0">
+      <stop offset="0" stop-color="#fbf7ee"/>
+      <stop offset=".78" stop-color="#f6efe0"/>
+      <stop offset="1" stop-color="#e3d5bc"/>
+    </linearGradient>
+    <linearGradient id="ribbon" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7f9a6b"/>
+      <stop offset="1" stop-color="#5f7a4e"/>
+    </linearGradient>
+    <filter id="soft" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#3c2814" flood-opacity=".22"/>
+    </filter>
+  </defs>
+  <g transform="translate(512 528) scale(.6) translate(-512 -560)">
+  <!--
+    Readly 图标：一本翻开的书（暖纸配色）。
+    轮廓参考 Readest 的图标（readest/readest，AGPL-3.0），重画并改为 Readly 的配色：
+    赤陶色封面、象牙白书页、暖墨色字行、鼠尾草绿书签丝带与一朵小雏菊。
+  -->
+  
+
+  <g filter="url(#soft)">
+    <!-- 封面（书壳），在书页后面、下沿露出来 -->
+    <path fill="url(#cover)" d="M84 318 Q84 296 106 294 L460 300 Q496 302 512 326 Q528 302 564 300 L918 294 Q940 296 940 318 L940 748 Q940 772 916 774 L594 786 Q546 790 524 818 L512 832 L500 818 Q478 790 430 786 L108 774 Q84 772 84 748 Z"/>
+
+    <!-- 书页厚度：左右各三层页边 -->
+    <path fill="#e9dcc4" d="M120 284 C262 246 404 252 500 312 L500 768 C404 716 262 712 120 736 Z"/>
+    <path fill="#efe4cf" d="M126 276 C266 238 406 244 500 302 L500 758 C406 706 266 702 126 726 Z"/>
+    <path fill="#e9dcc4" d="M904 284 C762 246 620 252 524 312 L524 768 C620 716 762 712 904 736 Z"/>
+    <path fill="#efe4cf" d="M898 276 C758 238 618 244 524 302 L524 758 C618 706 758 702 898 726 Z"/>
+
+    <!-- 左页、右页 -->
+    <path fill="url(#pageL)" d="M132 266 C270 228 410 234 502 292 L502 748 C410 696 270 692 132 716 Z"/>
+    <path fill="url(#pageR)" d="M892 266 C754 228 614 234 522 292 L522 748 C614 696 754 692 892 716 Z"/>
+
+    <!-- 书脊的凹缝 -->
+    <path fill="#c9b493" d="M502 292 Q512 300 522 292 L522 748 Q512 760 502 748 Z"/>
+  </g>
+
+  <!-- 字行（暖墨色，跟着书页微微弯） -->
+  <g fill="none" stroke="#8a6650" stroke-opacity=".72" stroke-width="15" stroke-linecap="round">
+    <path d="M182 338 Q320 304 452 344"/>
+    <path d="M182 380 Q320 346 452 386"/>
+    <path d="M182 422 Q320 388 452 428"/>
+    <path d="M182 464 Q300 434 392 452"/>
+    <path d="M182 530 Q320 496 452 536"/>
+    <path d="M182 572 Q320 538 452 578"/>
+    <path d="M182 614 Q320 580 452 620"/>
+    <path d="M182 656 Q288 628 360 640"/>
+
+    <path d="M572 344 Q704 304 842 338"/>
+    <path d="M572 386 Q704 346 842 380"/>
+    <path d="M572 428 Q704 388 842 422"/>
+    <path d="M572 470 Q704 430 842 464"/>
+    <path d="M572 536 Q704 496 842 530"/>
+    <path d="M572 578 Q704 538 842 572"/>
+    <path d="M572 620 Q680 588 760 600"/>
+  </g>
+
+  <!-- 书签丝带：从书脊下方垂下，末端燕尾 -->
+  <path fill="url(#ribbon)" d="M540 742 L612 742 L612 930 L576 896 L540 930 Z"/>
+  <path fill="#000" fill-opacity=".12" d="M540 742 L612 742 L612 760 L540 760 Z"/>
+
+  <!-- 丝带上的小雏菊 -->
+  <g transform="translate(576 806)">
+    <g fill="#faf6ec">
+      <ellipse rx="9" ry="22" transform="rotate(0)"   cy="-17"/>
+      <ellipse rx="9" ry="22" transform="rotate(45)"  cy="-17"/>
+      <ellipse rx="9" ry="22" transform="rotate(90)"  cy="-17"/>
+      <ellipse rx="9" ry="22" transform="rotate(135)" cy="-17"/>
+      <ellipse rx="9" ry="22" transform="rotate(180)" cy="-17"/>
+      <ellipse rx="9" ry="22" transform="rotate(225)" cy="-17"/>
+      <ellipse rx="9" ry="22" transform="rotate(270)" cy="-17"/>
+      <ellipse rx="9" ry="22" transform="rotate(315)" cy="-17"/>
+    </g>
+    <circle r="11" fill="#d97757"/>
+  </g>
+</g>
+</svg>

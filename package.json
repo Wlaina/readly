@@ -1,0 +1,37 @@
+{
+  "name": "readly",
+  "private": true,
+  "version": "0.8.2",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "app:dev": "tauri dev",
+    "app:build": "tauri build",
+    "android:dev": "tauri android dev",
+    "android:build": "tauri android build --apk"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.1.1",
+    "@tauri-apps/plugin-dialog": "^2.8.4",
+    "@tauri-apps/plugin-fs": "^2.0.3",
+    "@tauri-apps/plugin-http": "^2.0.1",
+    "@tauri-apps/plugin-updater": "^2.14.1",
+    "construct-style-sheets-polyfill": "^3.1.0",
+    "fflate": "^0.8.2",
+    "idb-keyval": "^6.2.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^5.0.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "typescript": "~5.6.3",
+    "vite": "^5.4.11"
+  }
+}
