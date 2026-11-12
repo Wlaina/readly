@@ -14,7 +14,7 @@ $repo = 'Wlaina/readly'
 # 旧的安装包仓库：0.8.2 及以前的版本到这里检查更新。过渡期内把新版本也发一份过去，
 # 让它们能升级到读新仓库的版本；过渡结束后改成 $false，旧仓库归档为只读（不要删，旧版本靠它兜底）
 $legacyRepo = 'Wlaina/readly-releases'
-$publishLegacy = $true
+$publishLegacy = $false  # 2026-11-12 过渡结束，旧仓库已归档（只读，不能再发布）
 $gh = 'C:\Program Files\GitHub CLI\gh.exe'
 $conf = Get-Content 'src-tauri\tauri.conf.json' -Raw -Encoding UTF8 | ConvertFrom-Json
 $ver = $conf.version
