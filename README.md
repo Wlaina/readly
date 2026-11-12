@@ -7,7 +7,7 @@
 <p align="center">一个安静的轻量电子书阅读器 · Windows / Android · EPUB / TXT · WebDAV 多端同步</p>
 
 <p align="center">
-  <a href="https://github.com/Wlaina/readly-releases/releases/latest">下载安装包</a> ·
+  <a href="https://github.com/Wlaina/readly/releases/latest">下载安装包</a> ·
   <a href="#开发">从源码构建</a> ·
   <a href="LICENSE">AGPL-3.0</a>
 </p>
@@ -29,7 +29,7 @@ Readly 只做三件事：**好好读书、好看、在手机和电脑之间无�
 
 ## 下载
 
-安装包发布在 [Wlaina/readly-releases](https://github.com/Wlaina/readly-releases/releases/latest)：
+安装包发布在本仓库的 [Releases](https://github.com/Wlaina/readly/releases/latest)：
 
 - Windows：`Readly_x.y.z_x64-setup.exe`（安装版，自动更新）
 - Android：`Readly-arm64.apk`（arm64）

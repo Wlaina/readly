@@ -1,5 +1,5 @@
 /**
- * 应用内更新（GitHub Releases：Wlaina/readly-releases）
+ * 应用内更新（GitHub Releases：Wlaina/readly；旧仓库 Wlaina/readly-releases 作为兜底）
  * - Windows：Tauri 官方更新插件。下载安装包、校验签名，然后静默覆盖安装并自动重启。
  * - 安卓：读取同一份 latest.json，比较版本号，下载 APK 后调起系统安装。
  * 状态放在一个小 store 里，设置页和书架上的更新提示共用。
@@ -9,8 +9,15 @@ import { isTauri } from './storage'
 import { androidBridge, isWindowsApp } from './native'
 import { isAndroid } from './device'
 
-export const RELEASES_PAGE = 'https://github.com/Wlaina/readly-releases/releases'
-const LATEST_JSON = 'https://github.com/Wlaina/readly-releases/releases/latest/download/latest.json'
+export const RELEASES_PAGE = 'https://github.com/Wlaina/readly/releases'
+/**
+ * 更新清单的地址：按顺序尝试，前一个取不到（网络问题、地址失效）才用下一个。
+ * 0.8.3 起安装包和源码合并到 Wlaina/readly；旧仓库保留只读，留作兜底。
+ */
+const LATEST_JSON = [
+  'https://github.com/Wlaina/readly/releases/latest/download/latest.json',
+  'https://github.com/Wlaina/readly-releases/releases/latest/download/latest.json',
+]
 const LAST_CHECK_KEY = 'readly.update.lastCheck'
 
 type Status = 'idle' | 'checking' | 'none' | 'available' | 'downloading' | 'installing' | 'error'
@@ -70,9 +77,19 @@ export async function checkForUpdate(silent = false) {
       set({ status: 'available', version: u.version, notes: u.body ?? '' })
     } else {
       const { fetch } = await import('@tauri-apps/plugin-http')
-      const res = await fetch(`${LATEST_JSON}?t=${Date.now()}`, { method: 'GET', connectTimeout: 20000 } as RequestInit)
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const info = await res.json()
+      let info: any = null
+      let lastErr: unknown = null
+      for (const src of LATEST_JSON) {
+        try {
+          const res = await fetch(`${src}?t=${Date.now()}`, { method: 'GET', connectTimeout: 20000 } as RequestInit)
+          if (!res.ok) throw new Error(`HTTP ${res.status}`)
+          info = await res.json()
+          break
+        } catch (e) {
+          lastErr = e
+        }
+      }
+      if (!info) throw lastErr ?? new Error('no update info')
       const url: string | undefined = info?.platforms?.['android-aarch64']?.url
       if (!url || cmp(info.version, current) <= 0) return set({ status: 'none' })
       pendingApk = url
