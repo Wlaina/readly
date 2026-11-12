@@ -47,12 +47,6 @@ npx tauri build --bundles nsis   # Windows 安装包
 
 安卓打包见 `scripts/build-android.ps1`（Windows 上未开启开发者模式时用复制 .so 的方式绕过符号链接）。
 
-### 字体
-
-界面默认使用 Anthropic Sans / Serif / Mono。这些是 Anthropic 的专有字体，**不随本仓库分发**；
-没有字体文件时界面会自动退回到系统字体（思源宋体、微软雅黑等），功能不受影响。
-你也可以在应用的「设置 → 字体管理」里导入任何自己有权使用的字体。
-
 ### 目录
 
 ```
