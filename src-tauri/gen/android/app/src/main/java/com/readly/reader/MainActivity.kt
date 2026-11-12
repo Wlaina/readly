@@ -30,9 +30,8 @@ class MainActivity : TauriActivity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
-    // 最早的窗口底色：跟随上次的深浅色（WebView 创建之前的那一瞬间也不闪白）
-    val dark = getSharedPreferences("readly", MODE_PRIVATE).getBoolean("dark", false)
-    window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(if (dark) 0xFF141413.toInt() else 0xFFF5F4ED.toInt()))
+    // 最早的窗口底色：按主题模式决定（跟随系统时看系统此刻的深浅色，不用上次退出时的记录）
+    window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(startBg()))
     super.onCreate(savedInstanceState)
     handleIntent(intent)
   }
@@ -47,15 +46,18 @@ class MainActivity : TauriActivity() {
   override fun onWebViewCreate(webView: WebView) {
     webViewRef = webView
     webView.addJavascriptInterface(Bridge(), "ReadlyAndroid")
-    // 页面加载前先用上次的深浅色作为底色，深色模式启动不再闪白
-    val dark = getSharedPreferences("readly", MODE_PRIVATE).getBoolean("dark", false)
-    val bg = if (dark) 0xFF141413.toInt() else 0xFFF5F4ED.toInt()
+    // 页面加载前先套上对应的底色，深色模式启动不再闪白
+    val bg = startBg()
     webView.setBackgroundColor(bg)
     window.decorView.setBackgroundColor(bg)
     // 切到后台时也保留已经画好的画面：回到前台时直接显示，不用整屏重画（以前封面会先白一下）
     webView.settings.offscreenPreRaster = true
-    // wry 在调用本方法之后才挂上它自己的 WebViewClient：排到消息队列后面再接管
-    webView.post { guardRenderer(webView) }
+    // wry 在调用本方法之后才挂上它自己的 WebViewClient，配置里设了 backgroundColor 时还会把底色改掉
+    // （以前固定的浅色就是深色模式冷启动闪白的来源，现已从配置里去掉）：排到消息队列后面，再把底色改回来、接管渲染进程
+    webView.post {
+      webView.setBackgroundColor(startBg())
+      guardRenderer(webView)
+    }
   }
 
   /**
@@ -521,6 +523,12 @@ class MainActivity : TauriActivity() {
       return json.toString()
     }
 
+    /** 记住界面主题模式（system / light / dark），下次冷启动据此决定底色 */
+    @JavascriptInterface
+    fun setThemeMode(mode: String) {
+      getSharedPreferences("readly", MODE_PRIVATE).edit().putString("themeMode", mode).apply()
+    }
+
     @JavascriptInterface
     fun setSystemBarsDark(dark: Boolean) {
       // 记住深浅色，下次启动时 WebView 直接用对应底色
@@ -546,6 +554,19 @@ class MainActivity : TauriActivity() {
     } else {
       c.show(WindowInsetsCompat.Type.systemBars())
     }
+  }
+
+  /**
+   * 启动时的底色。界面主题为“跟随系统”（或旧版本没记录过）时按系统此刻的深浅色，
+   * 否则按用户选定的深浅色。以前只看上次退出时记下的颜色：白天用过、晚上系统自动转深色后再打开，就会先闪一下浅色。
+   */
+  private fun startBg(): Int {
+    val dark = when (getSharedPreferences("readly", MODE_PRIVATE).getString("themeMode", "system")) {
+      "dark" -> true
+      "light" -> false
+      else -> isNight(resources.configuration)
+    }
+    return if (dark) 0xFF141413.toInt() else 0xFFF5F4ED.toInt()
   }
 
   private fun isNight(c: android.content.res.Configuration) =

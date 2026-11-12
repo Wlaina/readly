@@ -273,6 +273,11 @@ input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 50%; }
    没在看的标签页也一样。渲染进程占的显存少了，就不容易被撑爆。 */
 .app.covered { content-visibility: hidden; }
 .tab-pane.inactive { content-visibility: hidden; }
+/* 页面第一次挂载：画出来之前先藏着，随后再播入场动画（冷启动不再“啪”地一下出现） */
+.tab-pane.pre-anim { opacity: 0; }
+/* 冷启动：背景与底栏等书架准备好再一起淡入（data-boot 由 index.html 设置、App.tsx 撤掉） */
+:root[data-boot="wait"] :is(.monet, .dock) { opacity: 0; }
+:root[data-boot="in"] :is(.monet, .dock) { animation: fade-in .5s ease both; }
 
 /* ---------- 面板：拖走、拉出 ---------- */
 /* 已经被手指送出去的面板：退场动画别再从头播一次 */

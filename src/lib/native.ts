@@ -53,6 +53,7 @@ export async function toggleFullscreen(): Promise<boolean> {
 interface AndroidBridge {
   setImmersive(on: boolean): void
   setSystemBarsDark(dark: boolean): void
+  setThemeMode?(mode: string): void
   isSystemDark?(): boolean
   setKeepScreenOn?(on: boolean): void
 }
@@ -71,6 +72,15 @@ export function setImmersive(on: boolean) {
 export function setSystemBarsDark(dark: boolean) {
   try {
     android()?.setSystemBarsDark(dark)
+  } catch (e) {
+    console.warn(e)
+  }
+}
+
+/** 记住界面主题模式：下次冷启动时原生层据此决定底色（跟随系统时看系统此刻的深浅色） */
+export function setNativeThemeMode(mode: 'system' | 'light' | 'dark') {
+  try {
+    android()?.setThemeMode?.(mode)
   } catch (e) {
     console.warn(e)
   }

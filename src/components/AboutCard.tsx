@@ -28,7 +28,7 @@ const SHORTCUTS: [string, string][] = [
 export default function AboutCard() {
   const settings = useStore(s => s.settings)
   const up = useUpdate()
-  const [version, setVersion] = useState('0.8.3')
+  const [version, setVersion] = useState('0.8.4')
   const [exporting, setExporting] = useState(false)
   useEffect(() => {
     if (!isTauri) return

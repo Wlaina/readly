@@ -11,10 +11,6 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
 $repo = 'Wlaina/readly'
-# 旧的安装包仓库：0.8.2 及以前的版本到这里检查更新。过渡期内把新版本也发一份过去，
-# 让它们能升级到读新仓库的版本；过渡结束后改成 $false，旧仓库归档为只读（不要删，旧版本靠它兜底）
-$legacyRepo = 'Wlaina/readly-releases'
-$publishLegacy = $false  # 2026-11-12 过渡结束，旧仓库已归档（只读，不能再发布）
 $gh = 'C:\Program Files\GitHub CLI\gh.exe'
 $conf = Get-Content 'src-tauri\tauri.conf.json' -Raw -Encoding UTF8 | ConvertFrom-Json
 $ver = $conf.version
@@ -80,20 +76,15 @@ if ($LASTEXITCODE) {
 git push origin $tag
 if ($LASTEXITCODE) { throw '推送标签失败' }
 
-# 5. 上传安装包与 latest.json（两个仓库里的 latest.json 都指向新仓库的安装包）
+# 5. 上传安装包与 latest.json
 $assets = @($setup, "$setup.sig", 'release\Readly-arm64.apk', $latestPath)
-function Publish-To($target, $useTag) {
-  & $gh release view $tag --repo $target *> $null
-  if ($LASTEXITCODE) {
-    if ($useTag) { & $gh release create $tag @assets --repo $target --title "Readly $ver" --notes $notes --latest --verify-tag }
-    else { & $gh release create $tag @assets --repo $target --title "Readly $ver" --notes $notes --latest }
-  } else {
-    & $gh release upload $tag @assets --repo $target --clobber
-  }
-  if ($LASTEXITCODE) { throw "上传到 $target 失败" }
-  Write-Host "完成：https://github.com/$target/releases/tag/$tag" -ForegroundColor Green
+& $gh release view $tag --repo $repo *> $null
+if ($LASTEXITCODE) {
+  & $gh release create $tag @assets --repo $repo --title "Readly $ver" --notes $notes --latest --verify-tag
+} else {
+  & $gh release upload $tag @assets --repo $repo --clobber
 }
-Publish-To $repo $true
-if ($publishLegacy) { Publish-To $legacyRepo $false }
+if ($LASTEXITCODE) { throw "上传到 $repo 失败" }
+Write-Host "完成：https://github.com/$repo/releases/tag/$tag" -ForegroundColor Green
 # 明确以 0 退出：前面原生命令留下的非零退出码不应让整次发布显示为失败
 exit 0

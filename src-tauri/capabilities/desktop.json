@@ -4,5 +4,5 @@
   "description": "Readly 电脑端额外权限：自动更新、另存为",
   "windows": ["main"],
   "platforms": ["windows", "macOS", "linux"],
-  "permissions": ["updater:default", "dialog:allow-save", "core:window:allow-destroy", "core:window:allow-hide"]
+  "permissions": ["updater:default", "dialog:allow-save", "core:window:allow-destroy", "core:window:allow-hide", "core:window:allow-set-background-color", "core:webview:allow-set-webview-background-color"]
 }

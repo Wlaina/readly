@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Readly",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "identifier": "com.readly.reader",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -19,7 +19,6 @@
         "minWidth": 360,
         "minHeight": 480,
         "dragDropEnabled": false,
-        "backgroundColor": "#f5f4ed",
         "visible": false
       }
     ],
@@ -71,8 +70,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkwOUEyMkI1MDA2RDdDNTcKUldSWGZHMEF0U0tha0t0enhicFY0VldOZEVISlJHU2VnTmJDVFlsTldHdndJZVZod1JzWWNGKzAK",
       "endpoints": [
-        "https://github.com/Wlaina/readly/releases/latest/download/latest.json",
-        "https://github.com/Wlaina/readly-releases/releases/latest/download/latest.json"
+        "https://github.com/Wlaina/readly/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"

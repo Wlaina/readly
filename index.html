@@ -6,11 +6,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
     <title>Readly</title>
     <script>
-      // 首帧之前就套上上次的深浅色，避免深色模式启动时先闪一下白
+      // 首帧之前就套上深浅色，避免深色模式启动时先闪一下白。
+      // 主题跟随系统（默认）时看系统此刻的深浅色，而不是上次退出时的记录：
+      // 白天用过、晚上系统自动转深色后再打开，以前会先闪一下浅色
       try {
-        var t = localStorage.getItem('readly.theme')
-        if (t === 'dark' || t === 'light') document.documentElement.dataset.theme = t
+        var m = localStorage.getItem('readly.themeMode')
+        var t = m === 'dark' || m === 'light' ? m : null
+        if (!t) {
+          var a = window.ReadlyAndroid
+          var sys = a && a.isSystemDark ? a.isSystemDark() : matchMedia('(prefers-color-scheme: dark)').matches
+          t = sys ? 'dark' : 'light'
+        }
+        document.documentElement.dataset.theme = t
       } catch (e) {}
+      // 背景和底栏先藏着，等书架准备好再一起淡入（见 App.tsx）
+      document.documentElement.dataset.boot = 'wait'
     </script>
     <style>
       html { background: #f5f4ed; }

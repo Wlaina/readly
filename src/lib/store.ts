@@ -8,7 +8,7 @@ import { paths, readBytes, readJSON, removeFile, writeBytes, writeJSON } from '.
 import { openBook, parseImport } from './book'
 import { endTask, runTask, startTask, updateTask, useTasks } from './tasks'
 import { setEpubMetadata } from './epubedit'
-import { invalidateCover } from './covers'
+import { invalidateCover, loadCover } from './covers'
 import { backgroundPut, isWindowsApp, writeFolderFile } from './native'
 import { registerCustomFont, unregisterCustomFont } from './fonts'
 import { dayKey, getDevice, initDevice } from './device'
@@ -349,6 +349,12 @@ export const useStore = create<State>((set, get) => {
       syncState = { etags: {}, scanned: {}, ...syncFile.state }
       const storedPassword = syncFile.config?.password ?? ''
       const password = await unprotect(storedPassword)
+      // 冷启动：先把第一屏的封面准备好再显示书架（最多等 0.5 秒），书架出来时不再先是一排灰块、再一张张跳出封面
+      if (settings) {
+        const first = visibleBooks(library, mergeSettings(settings).shelfSort).filter(b => b.hasCover)
+        const jobs = [...first.slice(0, 3).map(b => loadCover(b.hash, 'large')), ...first.slice(0, 12).map(b => loadCover(b.hash, 'thumb'))]
+        await Promise.race([Promise.allSettled(jobs), new Promise(r => setTimeout(r, 500))])
+      }
       set({
         ready: true,
         library,

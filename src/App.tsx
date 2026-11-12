@@ -2,7 +2,7 @@ import { lazy, startTransition, Suspense, useEffect, useLayoutEffect, useRef, us
 import { interruptedBook, useStore } from './lib/store'
 import { resolveFont } from './lib/fonts'
 import { enterReader, useAppDark, useDesktopLayout } from './lib/hooks'
-import { isWindowsApp, onOpenFiles, setSystemBarsDark, takePendingOpenFiles, toggleFullscreen } from './lib/native'
+import { isWindowsApp, onOpenFiles, setNativeThemeMode, setSystemBarsDark, takePendingOpenFiles, toggleFullscreen } from './lib/native'
 import { applyAccent, resolveAccent } from './lib/accent'
 import { isTauri } from './lib/storage'
 import { useTasks } from './lib/tasks'
@@ -45,22 +45,38 @@ const TABS: { id: Tab; label: string; icon: (p: React.SVGProps<SVGSVGElement>) =
 function TabPane({ active, children }: { active: boolean; children: React.ReactNode }) {
   const ref = useRef<HTMLDivElement>(null)
   const first = useRef(true)
+  const [booting, setBooting] = useState(true)
   useLayoutEffect(() => {
     const el = ref.current
     // 隐藏的页面不能被 Tab 键或读屏聚焦到
     if (el) (el as HTMLElement & { inert: boolean }).inert = !active
-    if (!el || !active) return
-    // 第一次挂载时类名本来就在，动画会自己播一次
+    if (!el) return
     if (first.current) {
       first.current = false
-      return
+      if (!active) return setBooting(false)
+      // 第一次挂载：先藏着，等真正画出来（两帧之后）再播入场动画。
+      // 冷启动时挂载书架很忙，直接播的话动画在第一帧画出来之前就播完了，看起来是“啪”地一下出现
+      // 冷启动时和背景、底栏一起入场（等 App 把 data-boot 设为 in）；之后切到新页面时等两帧即可
+      const root = document.documentElement
+      let raf = 0
+      let n = 0
+      const tick = () => {
+        if (root.dataset.boot === 'wait' || ++n < 2) raf = requestAnimationFrame(tick)
+        else setBooting(false)
+      }
+      raf = requestAnimationFrame(tick)
+      return () => {
+        cancelAnimationFrame(raf)
+        setBooting(false)
+      }
     }
+    if (!active) return
     el.classList.remove('page-anim')
     void el.offsetWidth // 重新触发入场动画
     el.classList.add('page-anim')
   }, [active])
   return (
-    <div ref={ref} className={`tab-pane page-anim ${active ? '' : 'inactive'}`} aria-hidden={!active}>
+    <div ref={ref} className={`tab-pane ${booting ? 'pre-anim' : 'page-anim'} ${active ? '' : 'inactive'}`} aria-hidden={!active}>
       {children}
     </div>
   )
@@ -101,6 +117,7 @@ function App() {
   const [openPaths, setOpenPaths] = useState<string[]>([])
   const [dragging, setDragging] = useState(false)
   const dark = useAppDark()
+  const themeMode = useStore(s => s.settings.appTheme)
   const desktop = useDesktopLayout()
   const runningTasks = useTasks(s => s.tasks.filter(t => t.status === 'running').length)
 
@@ -228,12 +245,63 @@ function App() {
     }
     // 阅读时系统栏跟着阅读背景走（由阅读器设置），这里不去抢
     if (!useStore.getState().reading) setSystemBarsDark(dark)
-    // Windows 标题栏跟随 Readly 的深浅色，而不是系统主题
-    if (isWindowsApp)
+    // Windows 标题栏跟随 Readly 的深浅色，而不是系统主题；
+    // 窗口和 WebView 自己的底色也换成同色：关闭、结束任务时网页先被拆掉，露出的是这层底色（以前固定是浅色，会闪一下白）
+    if (isWindowsApp) {
+      const color = dark ? { red: 0x14, green: 0x14, blue: 0x13, alpha: 255 } : { red: 0xf5, green: 0xf4, blue: 0xed, alpha: 255 }
       import('@tauri-apps/api/window')
-        .then(m => m.getCurrentWindow().setTheme(dark ? 'dark' : 'light'))
+        .then(m => {
+          const w = m.getCurrentWindow()
+          return Promise.all([w.setTheme(dark ? 'dark' : 'light'), w.setBackgroundColor(color)])
+        })
         .catch(e => console.warn('设置标题栏主题失败', e))
+      import('@tauri-apps/api/webview')
+        .then(m => m.getCurrentWebview().setBackgroundColor(color))
+        .catch(e => console.warn('设置网页底色失败', e))
+    }
   }, [dark])
+
+  // 记住主题模式：下次启动的首帧（index.html）和安卓原生底色据此决定，跟随系统时看系统此刻的深浅色
+  useEffect(() => {
+    try {
+      localStorage.setItem('readly.themeMode', themeMode)
+    } catch {
+      /* 忽略 */
+    }
+    setNativeThemeMode(themeMode)
+  }, [themeMode])
+
+  // 冷启动入场：背景和底栏在 index.html 里先藏着，数据读完、书架画出来（两帧之后）再和书架一起淡入，
+  // 不再是背景、底栏先“啪”地出现，书架过一会儿才浮上来。3 秒还没准备好也照样显示，免得一直空白
+  useEffect(() => {
+    const root = document.documentElement
+    if (root.dataset.boot !== 'wait') return
+    const show = () => {
+      if (root.dataset.boot !== 'wait') return
+      root.dataset.boot = 'in'
+      setTimeout(() => delete root.dataset.boot, 700)
+    }
+    if (!ready) {
+      const t = setTimeout(show, 3000)
+      return () => clearTimeout(t)
+    }
+    // 等画面真正开始稳定出帧再淡入：冷启动时第一帧要画很久（封面、模糊背景），
+    // 动画如果在这之前开始，等画面出来时已经播完了，看起来还是“啪”地一下
+    let raf = 0
+    let last = 0
+    let smooth = 0
+    const t0 = performance.now()
+    const tick = (now: number) => {
+      smooth = last && now - last < 24 ? smooth + 1 : 0
+      last = now
+      if (smooth >= 3 || now - t0 > 1500) {
+        console.info(`[boot] 入场淡入：数据就绪后 ${Math.round(now - t0)}ms`)
+        show()
+      } else raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [ready])
 
   // 窗口启动时是隐藏的：设置读完、深浅色套好、画完两帧之后再显示，避免白屏一闪
   useEffect(() => {

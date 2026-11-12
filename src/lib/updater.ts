@@ -1,5 +1,5 @@
 /**
- * 应用内更新（GitHub Releases：Wlaina/readly；旧仓库 Wlaina/readly-releases 作为兜底）
+ * 应用内更新（GitHub Releases：Wlaina/readly）
  * - Windows：Tauri 官方更新插件。下载安装包、校验签名，然后静默覆盖安装并自动重启。
  * - 安卓：读取同一份 latest.json，比较版本号，下载 APK 后调起系统安装。
  * 状态放在一个小 store 里，设置页和书架上的更新提示共用。
@@ -12,11 +12,10 @@ import { isAndroid } from './device'
 export const RELEASES_PAGE = 'https://github.com/Wlaina/readly/releases'
 /**
  * 更新清单的地址：按顺序尝试，前一个取不到（网络问题、地址失效）才用下一个。
- * 0.8.3 起安装包和源码合并到 Wlaina/readly；旧仓库保留只读，留作兜底。
+ * 0.8.3 起安装包和源码合并到 Wlaina/readly（旧的安装包仓库已删除）。
  */
 const LATEST_JSON = [
   'https://github.com/Wlaina/readly/releases/latest/download/latest.json',
-  'https://github.com/Wlaina/readly-releases/releases/latest/download/latest.json',
 ]
 const LAST_CHECK_KEY = 'readly.update.lastCheck'
 

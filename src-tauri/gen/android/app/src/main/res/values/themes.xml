@@ -1,6 +1,8 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
     <!-- Base application theme. -->
     <style name="Theme.readly" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- Customize your theme here. -->
+        <!-- 启动画面与窗口底色：跟随系统当前深浅色，冷启动不闪白 -->
+        <item name="android:windowBackground">@color/readly_bg</item>
+        <item name="android:windowSplashScreenBackground" tools:targetApi="31">@color/readly_bg</item>
     </style>
 </resources>
