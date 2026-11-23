@@ -44,7 +44,8 @@
 .src-vol-head { display: flex; align-items: center; justify-content: space-between; padding: 8px 4px 4px; border-top: 1px solid var(--border); }
 .src-vols { min-height: 80px; }
 .src-vols .cat-row { width: 100%; }
-.src-vols .cat-name { flex: 1; min-width: 0; }
+.src-vols .cat-name { flex: 1; min-width: 0; white-space: normal; overflow-wrap: anywhere; line-height: 1.4; }
+.src-vols .cat-row > .muted { flex: none; white-space: nowrap; }
 
 .src-downloads { display: flex; flex-direction: column; gap: 10px; }
 .src-dl { display: flex; align-items: center; gap: 8px; }

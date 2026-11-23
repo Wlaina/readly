@@ -14,7 +14,7 @@ import { BROWSER_SLOTS, cancelBrowser } from './browser'
 import { appendEpub, buildEpub, editVolumes, imageType, readManifest, type EpubImage, type EpubVolume, type SourceManifest } from './epub'
 import type { BookSource, ChapterContent, SourceBook, SourceChapter, SourceVolume } from './types'
 import type { BookRecord, SourceRef } from '../types'
-import { styleVolTitle, tidyPlan, volKey, volStyle } from './update'
+import { matchVolumes, styleVolTitle, tidyPlan, volStyle } from './update'
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 const aborted = () => new DOMException('cancelled', 'AbortError')
@@ -345,15 +345,14 @@ export async function downloadToShelf(
       let manifest: SourceManifest = { ...read, volumes: read.volumes.map((v, i) => ({ ...v, file: v.file ?? i })) }
       // 换书源（或以前换过、书里还记着另一个书源的卷 id）：已有的卷按卷号换成这个书源上的卷，以后按这个书源追更
       const remote = merge.remote ?? []
-      const ids = new Set(remote.map(v => v.id))
-      const keys = remote.map(v => volKey(v.title, book.title))
       const sameSrc = manifest.source === src.id && manifest.id === book.id
+      const idx = matchVolumes(manifest, remote, { shelfTitle: cur.title, remoteTitle: book.title }, !sameSrc)
       manifest = {
         source: src.id,
         id: book.id,
-        volumes: manifest.volumes.map(v => {
-          if (sameSrc && ids.has(v.id)) return v
-          const r = remote[keys.indexOf(volKey(v.title, cur.title))]
+        volumes: manifest.volumes.map((v, n) => {
+          const r = remote[idx.indexOf(n)]
+          if (!r || r.id === v.id) return v
           // 卷名保留书里原来的（只换成新书源的卷 id 和章节）
           return r ? { ...volEntry(r), title: v.title, file: v.file } : v
         }),
@@ -459,7 +458,7 @@ export function toSourceRef(m: SourceManifest): SourceRef {
  * 整理书架上一本从书库下载的书：删掉重复的卷、卷名统一成一种样式。
  * 改的是书籍文件本身（写回书籍文件夹、上传云端），进度、书签、笔记的位置跟着改写
  */
-export async function tidyBook(hash: string) {
+export async function tidyBook(hash: string, remote?: { vols: SourceVolume[]; title: string }) {
   const store = useStore.getState()
   const cur = store.library.find(b => b.hash === hash && !b.deletedAt)
   if (!cur) return
@@ -467,12 +466,10 @@ export async function tidyBook(hash: string) {
   const read = readManifest(old)
   if (!read) throw new Error(tr('这本书不是从书库下载的'))
   // 书里记的卷 id 可能还是换书源前的：按卷号换成书架记录上的（记录跟着现在的书源）
-  const recKeys = cur.source?.kind === read.source ? cur.source.volumes.map(v => volKey(v.title, cur.title)) : []
-  const vols = read.volumes.map((v, i) => {
-    const r = cur.source?.volumes[recKeys.indexOf(volKey(v.title, cur.title))]
-    return { ...v, id: r && r.id !== v.id ? r.id : v.id, file: v.file ?? i }
-  })
-  const plan = tidyPlan(vols, cur.title)
+  const rv = cur.source?.kind === read.source ? cur.source.volumes : []
+  const ri = matchVolumes({ volumes: rv }, read.volumes, { shelfTitle: cur.title, remoteTitle: cur.title })
+  const vols = read.volumes.map((v, i) => ({ ...v, id: ri[i] >= 0 ? rv[ri[i]].id : v.id, file: v.file ?? i }))
+  const plan = tidyPlan(vols, cur.title, remote)
   if (!plan.remove.length && !plan.rename.size) {
     store.showToast(tr('《{title}》的卷已经很整齐了', { title: cur.title }))
     return

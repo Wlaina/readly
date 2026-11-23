@@ -40,9 +40,9 @@ const norm = (s: string) =>
     .toLowerCase()
 
 const CN_DIGIT: Record<string, number> = { 零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 }
-/** “十二”“二十一”“3”→ 数字 */
+/** “十二”“二十一”“3”“5点5”（5.5）→ 数字 */
 function toNum(s: string): number | null {
-  if (/^\d+$/.test(s)) return Number(s)
+  if (/^\d+(点\d+)?$/.test(s)) return Number(s.replace('点', '.'))
   let n = 0
   let cur = 0
   for (const c of s) {
@@ -56,34 +56,51 @@ function toNum(s: string): number | null {
 }
 
 /**
- * 卷的“身份”：有卷号的按卷号（第一卷 / 书名 1 / Vol.1 都算第 1 卷），
+ * 卷的“身份”：有卷号的按卷号（第一卷 / 书名 1 / Vol.1 都算第 1 卷，5.5 卷算 5.5），
  * 没有卷号的（短篇、番外…）按去掉书名后的卷名
  */
 export function volKey(title: string, bookTitle: string): string {
   return volParts(title, bookTitle).key
 }
 
+/** 卷号后面带副标题的也要分清：“5.5”和“5.5「恶魔呢喃」豪华册子”是两卷；比较用 full（卷号 + 副标题） */
+export const volFull = (title: string, bookTitle: string) => {
+  const p = volParts(title, bookTitle)
+  return p.n == null ? p.key : `${p.key}|${norm(p.rest)}`
+}
+
+/** 小数点在 norm 里会被去掉（5.5 → 55），先换成“点” */
+const keepDot = (s: string) => s.replace(/(\d)\s*[.．]\s*(\d)/g, '$1点$2')
+const NUM = '(\d+(?:点\d+)?|[零〇一二两三四五六七八九十百]+)'
+const RE_CN = new RegExp(`^(.*?)第${NUM}[卷册部集](.*)$`)
+const RE_PLAIN = /^()(?:vol|卷)?(\d+(?:点\d+)?|[一二三四五六七八九十]+)(?![\d点])(.*)$/
+
 /**
- * 拆开卷名：卷号 n（没有为 null）、卷号后面的副标题 rest（例如“短篇集”），以及比较用的 key。
+ * 拆开卷名：卷号 n（没有为 null）、卷号后面的副标题 rest（例如“短篇集”）、比较用的 key，
+ * 以及卷名里「」『』括起来的小标题 quote（特典小册子常靠它对上：“「恶魔呢喃」短篇集册子”和“5.5「恶魔呢喃」豪华册子”）。
  * “第十五卷 短篇集”“魔女之旅 15 短篇集”“Vol.15 短篇集”都是第 15 卷、副标题“短篇集”
  */
-export function volParts(title: string, bookTitle: string): { n: number | null; rest: string; key: string } {
-  let t = norm(title)
-  const bt = norm(bookTitle)
+export function volParts(title: string, bookTitle: string): { n: number | null; rest: string; key: string; quote: string } {
+  let t = norm(keepDot(title))
+  const bt = norm(keepDot(bookTitle))
   if (bt && t.startsWith(bt)) t = t.slice(bt.length)
-  const m =
-    t.match(/^(.*?)第(\d+|[零〇一二两三四五六七八九十百]+)[卷册部集](.*)$/) ?? t.match(/^()(?:vol|卷)?(\d+|[一二三四五六七八九十]+)(?!\d)(.*)$/)
+  const q = title.match(/[「『]([^」』]+)[」』]/)
+  const quote = q ? norm(q[1]) : ''
+  const m = t.match(RE_CN) ?? t.match(RE_PLAIN)
   const n = m ? toNum(m[2]) : null
-  if (n == null) return { n: null, rest: '', key: t }
-  // 副标题用原文（norm 去掉了空格标点），从原卷名里取卷号之后的部分
-  const raw = title.replace(/\s+/g, ' ').trim()
-  const after = raw.match(/(?:第\s*(?:\d+|[零〇一二两三四五六七八九十百]+)\s*[卷册部集]|(?:vol\.?|卷)?\s*\d+|[一二三四五六七八九十]+$)\s*(.*)$/i)
-  return { n, rest: m![3] ? (after?.[1] ?? '').trim() : '', key: `#${n}` }
+  if (n == null) return { n: null, rest: '', key: t, quote }
+  // 副标题用原文（norm 去掉了空格标点）：去掉书名，取卷号之后的部分
+  let raw = title.replace(/\s+/g, ' ').trim()
+  const rawBt = bookTitle.replace(/\s+/g, ' ').trim()
+  if (rawBt && raw.startsWith(rawBt)) raw = raw.slice(rawBt.length)
+  const after = raw.match(/(?:第\s*(?:\d+(?:\s*[.．]\s*\d+)?|[零〇一二两三四五六七八九十百]+)\s*[卷册部集]|(?:vol\.?|卷)?\s*\d+(?:\s*[.．]\s*\d+)?|[一二三四五六七八九十]+$)\s*(.*)$/i)
+  return { n, rest: m![3] ? (after?.[1] ?? '').trim() : '', key: `#${n}`, quote }
 }
 
 /** 卷名统一成书里原有的样式：“第十五卷 短篇集”或“书名 15 短篇集” */
 const CN = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九']
 export function cnNum(n: number): string {
+  if (!Number.isInteger(n)) return String(n)
   if (n < 10) return CN[n]
   if (n < 20) return '十' + (n % 10 ? CN[n % 10] : '')
   if (n < 100) return CN[Math.floor(n / 10)] + '十' + (n % 10 ? CN[n % 10] : '')
@@ -106,7 +123,9 @@ export function styleVolTitle(title: string, srcBookTitle: string, style: VolSty
   const p = volParts(title, srcBookTitle)
   if (p.n == null || !style) return title
   const head = style === 'cn' ? `第${cnNum(p.n)}卷` : `${bookTitle} ${p.n}`
-  return p.rest ? `${head} ${p.rest}` : head
+  if (!p.rest) return head
+  // 副标题以「」开头的不加空格：“书名 5.5「恶魔呢喃」豪华册子”
+  return /^[「『]/.test(p.rest) ? head + p.rest : `${head} ${p.rest}`
 }
 
 /** 同一本书在另一个书源上：书名一样，作者（两边都有时）也对得上 */
@@ -118,22 +137,34 @@ export function sameBook(a: { title: string; author: string }, b: { title: strin
 }
 
 /**
- * 网站上的卷对应到书里已有的哪一卷。同一个书源先按卷 id；对不上的（例如换过书源、书里记的还是另一个书源的卷 id）
- * 再按卷号 / 卷名。换了书源（cross）只按卷号 / 卷名。
- * titles：书里的书名、网站上的书名（卷名里常带着书名，比较前去掉）
+ * 网站上的卷对应到书里已有的哪一卷（没有为 -1），一卷只对一卷。按把握从大到小：
+ * 1. 同一个书源：卷 id（或卷名）一样
+ * 2. 卷号和副标题都一样（“第十五卷 短篇集” = “魔女之旅 15 短篇集”；没卷号的按卷名）
+ * 3. 「」里的小标题一样（“「天使细语」豪华小册子” = “11.5「天使细语」豪华小册子”）
+ * 4. 卷号一样、有一边没副标题（“第十五卷” = “魔女之旅 15 短篇集”）
+ * 换了书源（cross）不比卷 id。titles：书里的书名、网站上的书名（卷名里常带着书名，比较前去掉）
  */
-function matchVolumes(ref: SourceRef, remote: SourceVolume[], titles?: VolTitles, cross = false) {
-  const idx = remote.map(v => (cross ? -1 : ref.volumes.findIndex(r => sameVol(r, v))))
+export function matchVolumes(ref: { volumes: { id: string; title: string }[] }, remote: { id: string; title: string }[], titles?: VolTitles, cross = false) {
+  const idx = remote.map(() => -1)
+  const used = new Set<number>()
+  const pass = (same: (i: number, n: number) => boolean) =>
+    remote.forEach((_, i) => {
+      if (idx[i] >= 0) return
+      const n = ref.volumes.findIndex((_, n) => !used.has(n) && same(i, n))
+      if (n >= 0) {
+        idx[i] = n
+        used.add(n)
+      }
+    })
+  if (!cross) pass((i, n) => sameVol(ref.volumes[n], remote[i]))
   if (!titles) return idx
-  const used = new Set(idx.filter(x => x >= 0))
-  const keys = ref.volumes.map(r => volKey(r.title, titles.shelfTitle))
-  return idx.map((x, i) => {
-    if (x >= 0) return x
-    const k = volKey(remote[i].title, titles.remoteTitle)
-    const j = keys.findIndex((kk, n) => kk === k && !used.has(n))
-    if (j >= 0) used.add(j)
-    return j
-  })
+  const rp = remote.map(v => volParts(v.title, titles.remoteTitle))
+  const sp = ref.volumes.map(v => volParts(v.title, titles.shelfTitle))
+  const full = (p: ReturnType<typeof volParts>) => (p.n == null ? p.key : `${p.key}|${norm(p.rest)}`)
+  pass((i, n) => full(rp[i]) === full(sp[n]))
+  pass((i, n) => !!rp[i].quote && rp[i].quote === sp[n].quote)
+  pass((i, n) => rp[i].n != null && rp[i].key === sp[n].key && (!rp[i].rest || !sp[n].rest))
+  return idx
 }
 
 export type VolTitles = { shelfTitle: string; remoteTitle: string }
@@ -198,13 +229,13 @@ export function findShelfBook(
  * 下载追加时也用它算新的卷列表
  */
 export function crossRef(ref: SourceRef, shelfTitle: string, kind: string, id: string, remote: SourceVolume[], remoteTitle: string): SourceRef {
-  const remoteKeys = remote.map(v => volKey(v.title, remoteTitle))
+  const idx = matchVolumes(ref, remote, { shelfTitle, remoteTitle }, true)
   return {
     ...ref,
     kind,
     id,
-    volumes: ref.volumes.map(v => {
-      const r = remote[remoteKeys.indexOf(volKey(v.title, shelfTitle))]
+    volumes: ref.volumes.map((v, n) => {
+      const r = remote[idx.indexOf(n)]
       // 卷名保留书里原来的
       return r ? { id: r.id, title: v.title, chapters: r.chapters.length } : v
     }),
@@ -268,12 +299,13 @@ export async function checkUpdates(onlyStale = false) {
  * 卷 id 和章节取最后加的那份（它来自现在追更的书源）；卷名统一成书里多数卷的样式。
  * 返回要删掉的卷的位置、留下的卷从哪一卷取 id，以及要改的卷名（位置 → 新卷名）
  */
-export function tidyPlan(vols: { title: string }[], bookTitle: string) {
+export function tidyPlan(vols: { id?: string; title: string }[], bookTitle: string, remote?: { vols: { id: string; title: string }[]; title: string }) {
   const firstAt = new Map<string, number>()
   const remove: number[] = []
   const takeFrom = new Map<number, number>()
   vols.forEach((v, i) => {
-    const k = volKey(v.title, bookTitle)
+    // 卷号和副标题都一样才算重复（“5.5”和“5.5「恶魔呢喃」豪华册子”是两卷）
+    const k = volFull(v.title, bookTitle)
     const f = firstAt.get(k)
     if (f === undefined) firstAt.set(k, i)
     else {
@@ -285,10 +317,15 @@ export function tidyPlan(vols: { title: string }[], bookTitle: string) {
     vols.map(v => v.title),
     bookTitle,
   )
+  // 和网站上卷 id 一样、卷号却不一样的卷：卷名照网站上的重新写（修好以前整理时弄坏的卷名，例如 5.5 变成了 55）
+  const byId = new Map(remote?.vols.map(v => [v.id, v.title]))
   const rename = new Map<number, string>()
   vols.forEach((v, i) => {
     if (remove.includes(i)) return
-    const t = styleVolTitle(v.title, bookTitle, style, bookTitle)
+    const site = v.id ? byId.get(v.id) : undefined
+    const n = volParts(v.title, bookTitle).n
+    const fix = site && n != null && n !== volParts(site, remote!.title).n
+    const t = fix ? styleVolTitle(site, remote!.title, style, bookTitle) : styleVolTitle(v.title, bookTitle, style, bookTitle)
     if (t !== v.title) rename.set(i, t)
   })
   return { remove, takeFrom, rename }

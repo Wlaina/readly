@@ -478,13 +478,15 @@ function BookSheet({ source, id, onClose }: { source: BookSource; id: string; on
   const onlineShelved = useOnShelf(source.id, id)
   const plan = shelf?.source && vols ? planUpdate(shelf.source, vols, book ? { shelfTitle: shelf.title, remoteTitle: book.title } : undefined, !!cross) : null
   // 书里有重复的卷、卷名样式不统一：可以一键整理
-  const tidy = shelf?.source ? tidyPlan(shelf.source.volumes, shelf.title) : null
+  // 同一个书源时带上网站上的卷名，修好以前弄坏的卷名
+  const site = !cross && vols && book ? { vols, title: book.title } : undefined
+  const tidy = shelf?.source ? tidyPlan(shelf.source.volumes, shelf.title, site) : null
   const [tidying, setTidying] = useState(false)
   const runTidy = async () => {
     if (!shelf) return
     setTidying(true)
     try {
-      await tidyBook(shelf.hash)
+      await tidyBook(shelf.hash, site)
     } catch (e) {
       showToast(tr('整理失败：{e}', { e: errText(e) }))
     } finally {
@@ -641,7 +643,10 @@ function BookSheet({ source, id, onClose }: { source: BookSource; id: string; on
                     onClick={() => toggle(i)}
                   >
                     <span className="cat-check">{on && <IconCheck />}</span>
-                    <span className="cat-name">{v.title}</span>
+                    <span className="cat-name" title={v.title}>
+                      {/* 卷名前面的书名就不重复显示了（上面有），留出地方显示完整的卷名 */}
+                      {book && v.title.startsWith(book.title) && v.title.length > book.title.length ? v.title.slice(book.title.length).trim() : v.title}
+                    </span>
                     <span className="muted">
                       {st === 'have' ? tr('已在书架') : st === 'gap' ? tr('补到中间 · {n} 章', { n: v.chapters.length }) : tr('{n} 章', { n: v.chapters.length })}
                     </span>

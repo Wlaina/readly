@@ -120,9 +120,17 @@ class Writer {
   }
 }
 
+/** 图片本来就是压缩过的，再压一遍几乎不变小却很慢（60MB 的书要 2 秒多，界面会卡住）：直接存 */
+const IMG = /\.(jpe?g|png|gif|webp|avif)$/i
 const zip = (files: Zippable) =>
   // mimetype 必须是第一个文件且不压缩
-  zipSync({ mimetype: [strToU8('application/epub+zip'), { level: 0 }], ...files }, { level: 6 })
+  zipSync(
+    {
+      mimetype: [strToU8('application/epub+zip'), { level: 0 }],
+      ...Object.fromEntries(Object.entries(files).map(([k, v]) => [k, v instanceof Uint8Array && IMG.test(k) ? [v, { level: 0 }] : v])),
+    },
+    { level: 6 },
+  )
 
 /**
  * images：正文里每个图片地址对应下载好的图片（没下载成功的就留一行“[插图]”）。
