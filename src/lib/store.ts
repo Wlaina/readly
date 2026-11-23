@@ -223,6 +223,21 @@ export function interruptedBook(): string | null {
 
 const newId = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
 
+/**
+ * 书架上已删除的书（包括在其他设备上删的，同步过来只有删除标记）：删掉本机还留着的书籍文件和封面。
+ * 记录本身留着（删除标记要同步给其他设备）；重新导入同一本书时会恢复进度、书签
+ */
+async function purgeDeletedFiles() {
+  const { library } = useStore.getState()
+  const live = new Set(library.filter(b => !b.deletedAt).map(b => b.hash))
+  for (const b of library) {
+    if (!b.deletedAt || live.has(b.hash)) continue
+    await removeFile(paths.book(b.hash, b.format)).catch(() => {})
+    await removeFile(paths.cover(b.hash)).catch(() => {})
+    invalidateCover(b.hash)
+  }
+}
+
 export const useStore = create<State>((set, get) => {
   const persistLibrary = debounced(() => writeJSON(paths.library, get().library), 2500)
   const persistCategories = debounced(() => writeJSON(paths.categories, get().categories), 300)
@@ -417,6 +432,8 @@ export const useStore = create<State>((set, get) => {
         lastSyncAt: syncState.lastSyncAt,
         customFonts: fonts,
       })
+      // 在其他设备上删掉的书：同步只带来删除标记，本机的书籍文件和封面还留着，启动后顺手清掉
+      setTimeout(() => void purgeDeletedFiles(), 3000)
       // 旧版本留下的明文密码：立刻换成加密存放；解不开时（换了账户/重装）提示重新输入
       if (storedPassword && !isProtected(storedPassword)) persistSync()
       else if (storedPassword && !password) setTimeout(() => get().showToast(tr('需要重新输入 WebDAV 密码')), 1500)
@@ -1102,6 +1119,7 @@ export const useStore = create<State>((set, get) => {
           set({ syncStatus: 'ok', lastSyncAt: syncState.lastSyncAt })
           persistSync()
           endTask(taskId)
+          void purgeDeletedFiles()
           // 同步下来的新书：存一份到电脑的书籍文件夹（OneDrive 等会继续同步）
           if (!light) setTimeout(() => get().collectToFolder(), 0)
         } catch (e) {
