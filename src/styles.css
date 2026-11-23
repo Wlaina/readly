@@ -375,11 +375,11 @@ select.field { appearance: none; padding-right: 30px; background-image: linear-g
 @keyframes fade-in { from { opacity: 0; } }
 
 /* Dock：滑动高亮胶囊 */
-.dock { gap: 0; position: fixed; }
-.dock button { position: relative; z-index: 1; flex: 0 0 76px; min-width: 0; padding: 0; transition: color .25s; }
+.dock { gap: 0; position: fixed; --dock-w: min(76px, calc((100vw - 44px) / var(--dock-n, 4))); }
+.dock button { position: relative; z-index: 1; flex: 0 0 var(--dock-w); min-width: 0; padding: 0; transition: color .25s; }
 .dock button.active { background: transparent; }
 .dock-pill {
-  position: absolute; z-index: 0; top: 6px; left: 6px; width: 76px; height: calc(100% - 12px);
+  position: absolute; z-index: 0; top: 6px; left: 6px; width: var(--dock-w); height: calc(100% - 12px);
   border-radius: 999px; background: var(--brand-soft);
   transition: transform .38s cubic-bezier(.34, 1.4, .5, 1);
 }

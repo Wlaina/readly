@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { clearFinished, KIND_LABEL, useTasks, type Task } from '../lib/tasks'
+import { clearFinished, KIND_LABEL, taskControls, useTasks, type Task } from '../lib/tasks'
 import { useStore } from '../lib/store'
 import { Card } from './ui'
 import { IconCheck, IconDownload, IconSync, IconTransfer, IconX } from './icons'
@@ -41,7 +41,7 @@ function TaskRow({ t, now }: { t: Task; now: number }) {
         <div className="task-top">
           <span className="task-kind">{tr(KIND_LABEL[t.kind])}</span>
           <span className="task-title">{t.title}</span>
-          <span className="task-time">{time}</span>
+          <span className="task-time">{t.paused ? tr('已暂停') : time}</span>
         </div>
         {t.status === 'running' && (
           <div className={`task-bar ${ratio === null ? 'indeterminate' : ''}`}>
@@ -54,6 +54,26 @@ function TaskRow({ t, now }: { t: Task; now: number }) {
           {t.status !== 'running' && amount && !t.detail && null}
         </div>
       </div>
+      {t.status === 'running' && taskControls.has(t.id) && (
+        <div className="task-actions">
+          {t.paused
+            ? taskControls.get(t.id)!.resume && (
+                <button className="btn ghost" onClick={() => taskControls.get(t.id)?.resume?.()}>
+                  {tr('继续')}
+                </button>
+              )
+            : taskControls.get(t.id)!.pause && (
+                <button className="btn ghost" onClick={() => taskControls.get(t.id)?.pause?.()}>
+                  {tr('暂停')}
+                </button>
+              )}
+          {taskControls.get(t.id)!.cancel && (
+            <button className="btn ghost" aria-label={tr('取消')} onClick={() => taskControls.get(t.id)?.cancel?.()}>
+              <IconX />
+            </button>
+          )}
+        </div>
+      )}
     </div>
   )
 }

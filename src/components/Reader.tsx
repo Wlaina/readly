@@ -637,6 +637,7 @@ export default function Reader({ hash, closing = false }: { hash: string; closin
 
   const title = useStore(s => s.library.find(b => b.hash === hash)?.title ?? '')
   const localOnly = useStore(s => s.library.find(b => b.hash === hash)?.localOnly)
+  const isOnline = useStore(s => !!s.library.find(b => b.hash === hash)?.online)
   const reading = useStore(s => s.settings.reading)
   const behavior = useStore(s => s.settings.behavior)
   const customFonts = useStore(s => s.customFonts)
@@ -958,10 +959,16 @@ export default function Reader({ hash, closing = false }: { hash: string; closin
           st.settings.behavior.syncOnOpen && !rec.localOnly && st.sync.enabled
             ? st.syncQuick('pull', 8000).finally(() => (pullDone = true))
             : null
-        const bytes = await st.loadBookFile(rec)
-        if (cancelled) return
         formatRef.current = rec.format
-        book = await openBook(rec.format, bytes, rec.fileName)
+        if (rec.online) {
+          // 在线阅读：虚拟书，翻到哪章抓哪章（见 lib/sources/onlinebook.ts）
+          const { makeOnlineBook } = await import('../lib/sources/onlinebook')
+          book = await makeOnlineBook(rec)
+        } else {
+          const bytes = await st.loadBookFile(rec)
+          if (cancelled) return
+          book = await openBook(rec.format, bytes, rec.fileName)
+        }
         if (cancelled) return book.destroy?.()
         view = document.createElement('foliate-view')
         viewRef.current = view
@@ -1352,7 +1359,11 @@ export default function Reader({ hash, closing = false }: { hash: string; closin
             <IconSettings />
           </button>
         </div>
-        {localOnly && <div style={{ fontSize: 11.5, textAlign: 'center', color: 'var(--muted)' }}>{tr('这本书仅保存在本机，不会同步')}</div>}
+        {localOnly && (
+          <div style={{ fontSize: 11.5, textAlign: 'center', color: 'var(--muted)' }}>
+            {isOnline ? tr('在线阅读：边读边从网站获取，进度与笔记保存在本机') : tr('这本书仅保存在本机，不会同步')}
+          </div>
+        )}
       </div>
 
       {/* 没有原生亮度接口的平台：盖一层黑色遮罩调暗（不挡操作） */}

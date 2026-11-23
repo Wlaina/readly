@@ -21,7 +21,10 @@ import StatsPage from './components/StatsPage'
 import Dock from './components/Dock'
 import ConfirmDialog from './components/ConfirmDialog'
 import Onboarding from './components/Onboarding'
-import { IconChart, IconFullscreen, IconSettings, IconShelf, IconSync } from './components/icons'
+import { IconChart, IconCompass, IconFullscreen, IconSettings, IconShelf, IconSync } from './components/icons'
+import SourcesPage from './components/SourcesPage'
+import { browserSupported } from './lib/sources/browser'
+import { sourceBooks } from './lib/sources/update'
 import { tr } from './lib/i18n'
 
 const loadReader = () => import('./components/Reader')
@@ -29,10 +32,11 @@ const Reader = lazy(loadReader)
 
 let windowShown = false
 
-type Tab = 'shelf' | 'stats' | 'sync' | 'settings'
+type Tab = 'shelf' | 'sources' | 'stats' | 'sync' | 'settings'
 
 const TABS: { id: Tab; label: string; icon: (p: React.SVGProps<SVGSVGElement>) => React.ReactElement }[] = [
   { id: 'shelf', label: '书架', icon: IconShelf },
+  ...(browserSupported ? [{ id: 'sources' as Tab, label: '书库', icon: IconCompass }] : []),
   { id: 'stats', label: '统计', icon: IconChart },
   { id: 'sync', label: '同步', icon: IconSync },
   { id: 'settings', label: '设置', icon: IconSettings },
@@ -120,6 +124,8 @@ function App() {
   const themeMode = useStore(s => s.settings.appTheme)
   const desktop = useDesktopLayout()
   const runningTasks = useTasks(s => s.tasks.filter(t => t.status === 'running').length)
+  // 书库：书架上有更新可以追的书的数量
+  const sourceUpdates = useStore(s => sourceBooks(s.library).filter(b => b.source!.newVolumes || b.source!.newChapters).length)
 
   // 只初始化一次：切换语言会重新挂载 App，不能再次从磁盘读取旧设置
   useEffect(() => {
@@ -188,8 +194,8 @@ function App() {
         toggleFullscreen().catch(() => {})
         return
       }
-      // Ctrl+1~4：切换书架 / 统计 / 同步 / 设置（阅读时不响应）
-      if ((e.ctrlKey || e.metaKey) && /^[1-4]$/.test(e.key) && !useStore.getState().reading) {
+      // Ctrl+数字：按底栏顺序切换页面（阅读时不响应）
+      if ((e.ctrlKey || e.metaKey) && /^[1-9]$/.test(e.key) && Number(e.key) <= TABS.length && !useStore.getState().reading) {
         e.preventDefault()
         startTransition(() => setTab(TABS[Number(e.key) - 1].id))
       }
@@ -487,6 +493,7 @@ function App() {
             {TABS.filter(x => visited.has(x.id)).map(x => (
               <TabPane key={x.id} active={x.id === tab}>
                 {x.id === 'shelf' && <Library />}
+                {x.id === 'sources' && <SourcesPage />}
                 {x.id === 'stats' && <StatsPage />}
                 {x.id === 'sync' && <SyncPage />}
                 {x.id === 'settings' && <SettingsPage />}
@@ -499,7 +506,7 @@ function App() {
           tab={tab}
           onChange={t => startTransition(() => setTab(t))}
           side={desktop}
-          badges={{ sync: runningTasks }}
+          badges={{ sync: runningTasks, sources: sourceUpdates }}
           extra={
             <button className="dock-fs" aria-label={tr('全屏')} title={tr('全屏（F11）')} onClick={() => toggleFullscreen().catch(() => {})}>
               <IconFullscreen />

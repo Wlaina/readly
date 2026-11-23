@@ -22,6 +22,28 @@ export interface WatchedFolder {
   error?: string
   /** 无法导入（文件损坏）的书名 */
   failed?: string[]
+  /** 电脑端：把书架上其他来源的书（手机上传、云端同步下来的）也存一份到这个文件夹 */
+  collect?: boolean
+  /** 已经存进来过的书（hash）。用户之后从文件夹里删掉也不会再写回来 */
+  exported?: string[]
+  /** 电脑端：在书架上移除来自这个文件夹的书时，是否一并删除文件夹里的文件（缺省为每次询问） */
+  deleteFiles?: FolderDeleteMode
+}
+
+/** 移除书时如何处理书籍文件夹里的原文件：每次询问 / 总是一起删除 / 只删书架上的 */
+export type FolderDeleteMode = 'ask' | 'always' | 'never'
+
+/** 把书名变成合法的 Windows 文件名 */
+export function safeFileName(title: string, ext: string) {
+  const base = title
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^\.+/, '')
+    .replace(/[. ]+$/, '')
+    .slice(0, 120)
+  const reserved = /^(con|prn|aux|nul|com\d|lpt\d)$/i.test(base)
+  return `${base && !reserved ? base : 'book'}.${ext}`
 }
 
 export interface FolderEntry {
@@ -37,7 +59,9 @@ export const foldersSupported = isTauri
 const bridge = () => (window as any).ReadlyAndroid
 
 export const entryKey = (e: FolderEntry) => `${e.rel}|${e.size}|${e.mtime}`
-export const entryName = (e: FolderEntry) => e.rel.split('/').pop() ?? e.rel
+/** 从 known 的键（rel|size|mtime）取回文件路径；Windows 文件名里不会有 “|” */
+export const keyRel = (key: string) => key.split('|').slice(0, -2).join('|')
+export const entryName =(e: FolderEntry) => e.rel.split('/').pop() ?? e.rel
 
 export async function pickFolder(): Promise<{ name: string; path?: string; uri?: string } | null> {
   if (isAndroid && bridge()?.pickFolder) {

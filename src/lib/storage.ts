@@ -74,6 +74,8 @@ export const paths = {
   fonts: 'fonts.json',
   folders: 'folders.json',
   categories: 'categories.json',
+  /** 在线书架：收藏的在线书、目录快照与阅读进度 */
+  online: 'online.json',
   book: (hash: string, ext: string) => `books/${hash}.${ext}`,
   cover: (hash: string) => `covers/${hash}.img`,
   /** 缩小后的封面（thumb / large），由原图生成，可以随时删掉重建 */

@@ -1,0 +1,279 @@
+/**
+ * 把书源下载下来的书打包成 EPUB 3：每卷一个卷首页，每章一个 XHTML，插图和封面放进 images/。
+ * 来源记在 dc:source、dc:identifier（urn:readly-source:<书源>:<书号>）和 OEBPS/readly-source.json 里，
+ * 追更时据此知道已经有哪些卷、哪些章。
+ *
+ * 追更（appendEpub）只往书的**末尾**追加：新卷，或最后一卷新出的章节。前面的文件名、顺序都不变，
+ * 所以阅读进度、书签、笔记（都按书里的位置记）不会错位。
+ */
+import { strFromU8, strToU8, unzipSync, zipSync, type Zippable } from 'fflate'
+import type { ChapterContent, SourceBook } from './types'
+
+export interface EpubChapter {
+  id?: string
+  title: string
+  content: ChapterContent
+}
+
+export interface EpubVolume {
+  id?: string
+  title: string
+  chapters: EpubChapter[]
+}
+
+export interface EpubImage {
+  bytes: Uint8Array
+  type: string
+}
+
+/** 书里已经有哪些卷、章（存在 OEBPS/readly-source.json，也同步记在书架记录上） */
+export interface SourceManifest {
+  source: string
+  id: string
+  volumes: { id: string; title: string; chapters: string[] }[]
+}
+
+const esc = (s: string) =>
+  s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '')
+
+export function imageType(bytes: Uint8Array): { mime: string; ext: string } | null {
+  if (bytes[0] === 0xff && bytes[1] === 0xd8) return { mime: 'image/jpeg', ext: 'jpg' }
+  if (bytes[0] === 0x89 && bytes[1] === 0x50) return { mime: 'image/png', ext: 'png' }
+  if (bytes[0] === 0x47 && bytes[1] === 0x49) return { mime: 'image/gif', ext: 'gif' }
+  if (bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) return { mime: 'image/webp', ext: 'webp' }
+  return null
+}
+
+const page = (title: string, body: string) => `<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="zh-CN" lang="zh-CN">
+<head><meta charset="utf-8"/><title>${esc(title)}</title><link rel="stylesheet" type="text/css" href="style.css"/></head>
+<body>
+${body}
+</body>
+</html>`
+
+const CSS = `body { margin: 0; }
+h1.volume { margin: 30% 0 0; text-align: center; font-size: 1.6em; }
+h2 { font-size: 1.3em; margin: 1em 0 1.2em; }
+p { text-indent: 2em; margin: 0 0 .5em; line-height: 1.7; }
+p.blank { text-indent: 0; }
+div.illus { text-align: center; margin: 1em 0; text-indent: 0; }
+div.illus img { max-width: 100%; max-height: 95vh; }
+`
+
+const pad = (n: number, w: number) => String(n).padStart(w, '0')
+const volFile = (vi: number) => `v${pad(vi + 1, 3)}.xhtml`
+const chapFile = (vi: number, ci: number) => `v${pad(vi + 1, 3)}c${pad(ci + 1, 4)}.xhtml`
+
+/** 往书里写章节、插图时共用的状态 */
+class Writer {
+  files: Zippable = {}
+  manifest: string[] = []
+  spine: string[] = []
+  private imageNames = new Map<string, string>()
+  constructor(
+    private images: Map<string, EpubImage>,
+    private imgSeq = 0,
+  ) {}
+
+  addImage(img: EpubImage, name?: string) {
+    const t = imageType(img.bytes)
+    if (!t) return ''
+    const file = `images/${name ?? `img${pad(++this.imgSeq, 4)}`}.${t.ext}`
+    this.files[`OEBPS/${file}`] = [img.bytes, { level: 0 }]
+    this.manifest.push(`<item id="${file.replace(/[/.]/g, '_')}" href="${file}" media-type="${t.mime}"${name === 'cover' ? ' properties="cover-image"' : ''}/>`)
+    return file
+  }
+
+  volume(vi: number, title: string) {
+    const f = volFile(vi)
+    this.files[`OEBPS/${f}`] = strToU8(page(title, `<h1 class="volume">${esc(title)}</h1>`))
+    this.manifest.push(`<item id="v${vi}" href="${f}" media-type="application/xhtml+xml"/>`)
+    this.spine.push(`<itemref idref="v${vi}"/>`)
+    return f
+  }
+
+  chapter(vi: number, ci: number, ch: EpubChapter) {
+    const f = chapFile(vi, ci)
+    const body: string[] = [`<h2>${esc(ch.title)}</h2>`]
+    for (const b of ch.content.blocks) {
+      if (b.type === 'p') body.push(`<p>${esc(b.text)}</p>`)
+      else {
+        let name = this.imageNames.get(b.src)
+        if (name === undefined) {
+          const img = this.images.get(b.src)
+          name = img ? this.addImage(img) : ''
+          this.imageNames.set(b.src, name)
+        }
+        body.push(name ? `<div class="illus"><img src="${name}" alt=""/></div>` : `<p class="blank">[插图]</p>`)
+      }
+    }
+    this.files[`OEBPS/${f}`] = strToU8(page(ch.title, body.join('\n')))
+    this.manifest.push(`<item id="v${vi}c${ci}" href="${f}" media-type="application/xhtml+xml"/>`)
+    this.spine.push(`<itemref idref="v${vi}c${ci}"/>`)
+    return f
+  }
+}
+
+const zip = (files: Zippable) =>
+  // mimetype 必须是第一个文件且不压缩
+  zipSync({ mimetype: [strToU8('application/epub+zip'), { level: 0 }], ...files }, { level: 6 })
+
+/**
+ * images：正文里每个图片地址对应下载好的图片（没下载成功的就留一行“[插图]”）。
+ * cover：封面图片；没有就不设封面。
+ */
+export function buildEpub(
+  book: SourceBook,
+  sourceUrl: string,
+  volumes: EpubVolume[],
+  images: Map<string, EpubImage>,
+  cover: EpubImage | null,
+  manifest: SourceManifest,
+): Uint8Array {
+  const w = new Writer(images)
+  const nav: string[] = []
+  if (cover) w.addImage(cover, 'cover')
+  volumes.forEach((vol, vi) => {
+    const vf = w.volume(vi, vol.title)
+    const items = vol.chapters.map((ch, ci) => `<li><a href="${w.chapter(vi, ci, ch)}">${esc(ch.title)}</a></li>`)
+    nav.push(`<li><a href="${vf}">${esc(vol.title)}</a>${items.length ? `<ol>${items.join('')}</ol>` : ''}</li>`)
+  })
+
+  w.files['OEBPS/style.css'] = strToU8(CSS)
+  w.files['OEBPS/readly-source.json'] = strToU8(JSON.stringify(manifest))
+  w.files['OEBPS/nav.xhtml'] = strToU8(page(book.title, `<nav epub:type="toc" id="toc"><h1>${esc(book.title)}</h1><ol>${nav.join('\n')}</ol></nav>`))
+  const modified = new Date().toISOString().replace(/\.\d+Z$/, 'Z')
+  const opf = `<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid" xml:lang="zh-CN">
+<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+<dc:identifier id="bookid">urn:readly-source:${esc(book.source)}:${esc(book.id)}</dc:identifier>
+<dc:title>${esc(book.title)}</dc:title>
+<dc:creator>${esc(book.author)}</dc:creator>
+<dc:language>zh-CN</dc:language>
+<dc:source>${esc(sourceUrl)}</dc:source>
+${book.description ? `<dc:description>${esc(book.description)}</dc:description>` : ''}
+${book.tags.map(t => `<dc:subject>${esc(t)}</dc:subject>`).join('\n')}
+<meta property="dcterms:modified">${modified}</meta>
+${cover ? '<meta name="cover" content="images_cover_' + (imageType(cover.bytes)?.ext ?? 'jpg') + '"/>' : ''}
+</metadata>
+<manifest>
+<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+<item id="css" href="style.css" media-type="text/css"/>
+<item id="readly-source" href="readly-source.json" media-type="application/json"/>
+${w.manifest.join('\n')}
+</manifest>
+<spine>
+${w.spine.join('\n')}
+</spine>
+</package>`
+  w.files['OEBPS/content.opf'] = strToU8(opf)
+  w.files['META-INF/container.xml'] = strToU8(`<?xml version="1.0" encoding="utf-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>`)
+  return zip(w.files)
+}
+
+/** 读出 Readly 下载的 EPUB 里记录的来源；不是 Readly 从书源下载的书返回 null */
+export function readManifest(bytes: Uint8Array): SourceManifest | null {
+  try {
+    const f = unzipSync(bytes, {
+      filter: e => e.name === 'OEBPS/readly-source.json',
+    })['OEBPS/readly-source.json']
+    return f ? (JSON.parse(strFromU8(f)) as SourceManifest) : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 追更：往已有的书末尾追加。
+ * - toLast：最后一卷新出的章节（接在最后一卷后面）
+ * - volumes：新的卷
+ * 返回新的 EPUB；书里原有的内容、文件名、顺序都不变。
+ */
+export function appendEpub(
+  bytes: Uint8Array,
+  add: { toLast: EpubChapter[]; volumes: EpubVolume[] },
+  images: Map<string, EpubImage>,
+  manifest: SourceManifest,
+  /** 更清楚的封面：换掉书里原来的（只换封面图片本身，正文不动） */
+  cover?: EpubImage | null,
+): Uint8Array {
+  const files = unzipSync(bytes)
+  delete files.mimetype
+  const names = Object.keys(files)
+  const lastVol = Math.max(-1, ...names.map(n => Number(n.match(/^OEBPS\/v(\d{3})\.xhtml$/)?.[1] ?? 0) - 1))
+  const imgSeq = Math.max(0, ...names.map(n => Number(n.match(/^OEBPS\/images\/img(\d+)\./)?.[1] ?? 0)))
+  const w = new Writer(images, imgSeq)
+
+  // 目录：在原有目录上追加
+  const navDoc = new DOMParser().parseFromString(strFromU8(files['OEBPS/nav.xhtml']), 'application/xhtml+xml')
+  const XHTML = 'http://www.w3.org/1999/xhtml'
+  const topOl = navDoc.querySelector('nav > ol')
+  const li = (href: string, title: string) => {
+    const el = navDoc.createElementNS(XHTML, 'li')
+    const a = navDoc.createElementNS(XHTML, 'a')
+    a.setAttribute('href', href)
+    a.textContent = title
+    el.appendChild(a)
+    return el
+  }
+
+  if (add.toLast.length && lastVol >= 0) {
+    const existing = names.filter(n => new RegExp(`^OEBPS/v${pad(lastVol + 1, 3)}c\\d{4}\\.xhtml$`).test(n)).length
+    const volLi = topOl?.lastElementChild
+    let sub: Element | null | undefined = volLi?.querySelector('ol')
+    if (volLi && !sub) {
+      sub = navDoc.createElementNS(XHTML, 'ol')
+      volLi.appendChild(sub)
+    }
+    add.toLast.forEach((ch, i) => sub?.appendChild(li(w.chapter(lastVol, existing + i, ch), ch.title)))
+  }
+  add.volumes.forEach((vol, k) => {
+    const vi = lastVol + 1 + k
+    const item = li(w.volume(vi, vol.title), vol.title)
+    if (vol.chapters.length) {
+      const sub = navDoc.createElementNS(XHTML, 'ol')
+      vol.chapters.forEach((ch, ci) => sub.appendChild(li(w.chapter(vi, ci, ch), ch.title)))
+      item.appendChild(sub)
+    }
+    topOl?.appendChild(item)
+  })
+  files['OEBPS/nav.xhtml'] = strToU8(new XMLSerializer().serializeToString(navDoc))
+
+  // 包文件：追加清单与阅读顺序，更新修改时间
+  const opfDoc = new DOMParser().parseFromString(strFromU8(files['OEBPS/content.opf']), 'application/xml')
+  const OPF = 'http://www.idpf.org/2007/opf'
+  const frag = (xml: string) =>
+    [...new DOMParser().parseFromString(`<x xmlns="${OPF}">${xml}</x>`, 'application/xml').documentElement.children].map(n => opfDoc.importNode(n, true))
+  const man = opfDoc.getElementsByTagNameNS(OPF, 'manifest')[0]
+  const spine = opfDoc.getElementsByTagNameNS(OPF, 'spine')[0]
+  for (const n of frag(w.manifest.join(''))) man.appendChild(n)
+  for (const n of frag(w.spine.join(''))) spine.appendChild(n)
+  if (!opfDoc.querySelector('[id="readly-source"]'))
+    for (const n of frag('<item id="readly-source" href="readly-source.json" media-type="application/json"/>')) man.appendChild(n)
+  const mod = [...opfDoc.getElementsByTagNameNS(OPF, 'meta')].find(m => m.getAttribute('property') === 'dcterms:modified')
+  if (mod) mod.textContent = new Date().toISOString().replace(/\.\d+Z$/, 'Z')
+  files['OEBPS/content.opf'] = strToU8(new XMLSerializer().serializeToString(opfDoc))
+  files['OEBPS/readly-source.json'] = strToU8(JSON.stringify(manifest))
+
+  // 换封面：沿用原来的清单条目，只改文件内容（扩展名不同就连同 href、类型一起改）
+  const t = cover && imageType(cover.bytes)
+  if (cover && t) {
+    const item = [...opfDoc.getElementsByTagNameNS(OPF, 'item')].find(i => (i.getAttribute('properties') ?? '').includes('cover-image'))
+    if (item) {
+      const oldHref = item.getAttribute('href') ?? ''
+      const newHref = oldHref.replace(/\.[a-z]+$/i, `.${t.ext}`)
+      delete files[`OEBPS/${oldHref}`]
+      files[`OEBPS/${newHref}`] = cover.bytes
+      item.setAttribute('href', newHref)
+      item.setAttribute('media-type', t.mime)
+      files['OEBPS/content.opf'] = strToU8(new XMLSerializer().serializeToString(opfDoc))
+    }
+  }
+
+  return zip({ ...files, ...w.files })
+}

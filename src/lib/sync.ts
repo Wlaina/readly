@@ -46,7 +46,7 @@ export const DEFAULT_SYNC: SyncConfig = {
 /** 远端存储的书籍记录（去掉本机专属字段） */
 export type RemoteBook = Omit<
   BookRecord,
-  'hasFile' | 'hasCover' | 'syncedAt' | 'localOnly' | 'coverChecked' | 'coverRev' | 'fileRevLocal' | 'pendingUpload' | 'folderRef'
+  'hasFile' | 'hasCover' | 'syncedAt' | 'localOnly' | 'coverChecked' | 'coverRev' | 'fileRevLocal' | 'pendingUpload' | 'folderRef' | 'fileRevUploaded'
 >
 
 export const toRemote = ({
@@ -59,8 +59,13 @@ export const toRemote = ({
   pendingUpload: _g,
   folderRef: _h,
   coverRev: _i,
+  fileRevUploaded,
   ...rest
-}: BookRecord): RemoteBook => rest
+}: BookRecord): RemoteBook => ({
+  ...rest,
+  // 新文件还没传上去：先公布上一个已上传的版本，传完再公布新的
+  fileRev: _g ? fileRevUploaded : rest.fileRev,
+})
 
 export interface SyncMemo {
   /** 远端文件名（如 devices/xxx.json.gz）-> ETag */
@@ -149,6 +154,7 @@ export function mergeBook(local: BookRecord | undefined, remote: RemoteBook): Bo
     ...local,
     title: metaSrc.title,
     author: metaSrc.author,
+    source: metaSrc.source ?? local.source ?? remote.source,
     deletedAt: metaSrc.deletedAt,
     metaUpdatedAt: metaSrc.metaUpdatedAt,
     remotePath: local.remotePath ?? remote.remotePath,
@@ -515,21 +521,28 @@ export class SyncEngine {
     const downloads = books.filter(
       b => !b.pendingUpload && inCloud(b) && (!b.hasFile || (b.fileRev ?? 0) > (b.fileRevLocal ?? 0)),
     )
+    let uploaded = 0
     await pool(uploads, 3, async rec => {
       const bytes = await this.hooks.readBookFile(rec)
       if (!bytes) return
       log(tr('上传《{title}》', { title: rec.title }))
       await this.upload(this.filePath(rec), rec.title, bytes)
       const cur = this.hooks.getLibrary().find(b => b.hash === rec.hash)
-      if (cur?.pendingUpload) this.hooks.saveBooks([{ ...cur, pendingUpload: false }])
+      // 上传途中文件又被改了：这次传的不是最新的，留到下次再传
+      if (cur?.pendingUpload && (cur.fileRev ?? 0) === (rec.fileRev ?? 0)) {
+        this.hooks.saveBooks([{ ...cur, pendingUpload: false, fileRevUploaded: cur.fileRev }])
+        uploaded++
+      }
     })
+    // 新文件都传上去了：马上公布新的版本号，其他设备下次同步就会来下载
+    if (uploaded) await this.push()
     await pool(downloads, 3, async rec => {
       log(tr(rec.hasFile ? '更新《{title}》' : '下载《{title}》', { title: rec.title }))
       const bytes = await this.download(this.filePath(rec), rec.title, sizes.get(`${rec.hash}.${rec.format}`)).catch(() => null)
       if (!bytes) return
       await this.hooks.writeBookFile(rec, bytes)
       const cur = this.hooks.getLibrary().find(b => b.hash === rec.hash)
-      if (cur) this.hooks.saveBooks([{ ...cur, hasFile: true, fileRevLocal: cur.fileRev ?? 0 }])
+      if (cur) this.hooks.saveBooks([{ ...cur, hasFile: true, fileRevLocal: cur.fileRev ?? 0, size: bytes.byteLength }])
     })
   }
 

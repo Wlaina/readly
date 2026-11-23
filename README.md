@@ -24,6 +24,8 @@ Readly 只做三件事：**好好读书、好看、在手机和电脑之间无�
 - **外观**：11 种阅读背景 + 自定义颜色，字号、行距、段距、缩进、边距、宽屏双栏，可导入自己的字体；阅读时可单独调亮度
 - **书架**：多列 / 单本 3D 轮播，分类，多种排序，模糊搜索（支持拼音首字母）
 - **同步**：WebDAV（坚果云、Koofr、Nextcloud 等）——同步进度、书签、笔记、阅读时长、分类、书籍文件和设置
+- **书库**：从哔哩轻小说、轻小说文库搜索，在线阅读或下载到书架（含插图与封面），作者更新后追更新卷、保留阅读进度
+- **书籍文件夹**：电脑上选一个文件夹（例如 OneDrive），里面的书自动加入书架，其他设备加的书也可以自动存进去
 - **动画**：多种动画风格与速度；打开书时可选“翻开封面”“文字浮现”“符文飞入”
 - **其他**：阅读统计、自动更新、中文 / English 界面、诊断日志导出
 
@@ -77,6 +79,8 @@ app-icon/          图标源文件（SVG）
 
 - [Readest](https://github.com/readest/readest)（AGPL-3.0）：Readly 的思路与图标轮廓都来自它；Readly 的图标是在 Readest 图标的基础上重画并改了配色。
 - [foliate-js](https://github.com/johnfactotum/foliate-js)（MIT）：EPUB 渲染引擎，使用的是 Readest 维护的分支。
+- [LightNovelReader](https://github.com/dmzz-yyhyy/LightNovelReader)（Apache-2.0，© NightFish / yukonisen）：书库功能参考了它；轻小说文库的网页解析参照了它的实现。
+- [LightNovelReaderPlugin-linovelib](https://github.com/j955229/LightNovelReaderPlugin-linovelib)（Apache-2.0）：哔哩轻小说段落顺序的还原算法移植自它。
 - [Tauri](https://tauri.app/)、[React](https://react.dev/)、[zustand](https://github.com/pmndrs/zustand)。
 
 ## 许可证

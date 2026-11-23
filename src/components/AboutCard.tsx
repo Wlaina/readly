@@ -20,7 +20,7 @@ const SHORTCUTS: [string, string][] = [
   ['O', '翻页与操作'],
   ['D', '切换日间 / 夜间背景'],
   ['F11', '全屏'],
-  ['Ctrl+1 ~ 4', '切换书架 / 统计 / 同步 / 设置'],
+  ['Ctrl+1 ~ 5', '切换书架 / 书库 / 统计 / 同步 / 设置'],
   ['Ctrl+F', '书架：搜索书名'],
   ['Ctrl+O', '书架：导入书籍'],
 ]
@@ -28,7 +28,7 @@ const SHORTCUTS: [string, string][] = [
 export default function AboutCard() {
   const settings = useStore(s => s.settings)
   const up = useUpdate()
-  const [version, setVersion] = useState('0.8.4')
+  const [version, setVersion] = useState('0.9.0')
   const [exporting, setExporting] = useState(false)
   useEffect(() => {
     if (!isTauri) return

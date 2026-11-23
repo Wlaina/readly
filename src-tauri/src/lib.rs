@@ -5,6 +5,31 @@ use std::sync::Mutex;
 #[allow(unused_imports)]
 use tauri::{Emitter, Manager};
 
+#[cfg(desktop)]
+mod browser;
+#[cfg(desktop)]
+use browser::{browser_cancel, browser_hide, browser_load, browser_show};
+
+/* 书源隐藏浏览器：安卓走 MainActivity 里的原生 WebView，这几个命令只在电脑端有实现 */
+#[cfg(mobile)]
+#[tauri::command]
+async fn browser_load() -> Result<(), String> {
+    Err("unsupported".into())
+}
+#[cfg(mobile)]
+#[tauri::command]
+async fn browser_show() -> Result<(), String> {
+    Err("unsupported".into())
+}
+#[cfg(mobile)]
+#[tauri::command]
+async fn browser_hide() -> Result<(), String> {
+    Err("unsupported".into())
+}
+#[cfg(mobile)]
+#[tauri::command]
+fn browser_cancel() {}
+
 /// 通过“打开方式”传进来的书籍文件
 #[derive(Default)]
 struct OpenFiles {
@@ -227,6 +252,111 @@ fn write_folder_file(request: tauri::ipc::Request<'_>) -> Result<FolderEntry, St
     Ok(FolderEntry { rel: rel.replace('\\', "/"), size: md.len(), mtime })
 }
 
+/// 把书新建到书籍文件夹里（电脑端：其他设备添加的书存进 OneDrive 等文件夹）。
+/// 请求体是文件内容；x-root 为文件夹，x-rel 为希望的文件名（URL 编码）。
+/// 从不覆盖已有文件：重名时改成“书名 (2).epub”；先写临时文件再改名。
+#[tauri::command]
+fn create_folder_file(request: tauri::ipc::Request<'_>) -> Result<FolderEntry, String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("需要二进制内容".into());
+    };
+    let header = |k: &str| -> Result<String, String> {
+        let v = request.headers().get(k).and_then(|v| v.to_str().ok()).ok_or(format!("缺少 {k}"))?;
+        percent_encoding::percent_decode_str(v)
+            .decode_utf8()
+            .map(|s| s.into_owned())
+            .map_err(|e| e.to_string())
+    };
+    let root = PathBuf::from(header("x-root")?).canonicalize().map_err(|e| format!("找不到文件夹：{e}"))?;
+    let rel = header("x-rel")?;
+    // 只允许文件夹根目录下的普通文件名
+    if rel.is_empty() || rel.contains(['/', '\\', ':']) || rel.starts_with('.') {
+        return Err("文件名不合法".into());
+    }
+    let first = root.join(&rel);
+    if !is_book(&first) {
+        return Err("只能写入 epub / txt".into());
+    }
+    let stem = first.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let ext = first.extension().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut target = first.clone();
+    let mut n = 2;
+    while target.exists() {
+        if n > 99 {
+            return Err("重名文件太多".into());
+        }
+        target = root.join(format!("{stem} ({n}).{ext}"));
+        n += 1;
+    }
+    let tmp = target.with_extension("readly-tmp");
+    std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &target).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        e.to_string()
+    })?;
+    let md = std::fs::metadata(&target).map_err(|e| e.to_string())?;
+    let mtime = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let rel = target.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or(rel);
+    Ok(FolderEntry { rel, size: md.len(), mtime })
+}
+
+/// 删除书籍文件夹里的一本书（书架上移除书时可选“同时删除文件夹里的文件”）。
+/// 只允许删除文件夹内部已存在的 epub / txt 普通文件；文件已经不在了视为成功。
+/// 直接删除，不进回收站（OneDrive 等同步盘在网页端回收站里仍可找回）。
+#[tauri::command]
+fn delete_folder_file(root: String, rel: String) -> Result<(), String> {
+    let root = PathBuf::from(root).canonicalize().map_err(|e| format!("找不到文件夹：{e}"))?;
+    if rel.is_empty() {
+        return Err("文件名不合法".into());
+    }
+    let joined = root.join(&rel);
+    if !joined.exists() {
+        return Ok(());
+    }
+    let target = joined.canonicalize().map_err(|e| e.to_string())?;
+    if !target.starts_with(&root) || target == root || !is_book(&target) || !target.is_file() {
+        return Err("不允许删除该文件".into());
+    }
+    std::fs::remove_file(&target).map_err(|e| e.to_string())
+}
+
+/// 书源：下载插图 / 封面。图片站有防盗链，要带上来源页（浏览器端的 fetch 不能设置 Referer）。
+/// 只接受图片，最大 20 MB。
+#[tauri::command]
+async fn fetch_image(url: String, referer: String) -> Result<tauri::ipc::Response, String> {
+    use tauri_plugin_http::reqwest;
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("只允许网页地址".into());
+    }
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+        .timeout(std::time::Duration::from_secs(40))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.get(&url).header("Referer", referer).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status().as_u16()));
+    }
+    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    if bytes.len() > 20 * 1024 * 1024 {
+        return Err("图片太大".into());
+    }
+    let head = &bytes[..bytes.len().min(12)];
+    let is_image = head.starts_with(&[0xff, 0xd8])
+        || head.starts_with(&[0x89, b'P', b'N', b'G'])
+        || head.starts_with(b"GIF8")
+        || (head.len() >= 12 && &head[0..4] == b"RIFF" && &head[8..12] == b"WEBP");
+    if !is_image {
+        return Err("不是图片".into());
+    }
+    Ok(tauri::ipc::Response::new(bytes.to_vec()))
+}
+
 /// 安卓：读取 MainActivity 复制到缓存目录的书籍文件，读完即删
 #[tauri::command]
 fn read_cache_file(path: String) -> Result<tauri::ipc::Response, String> {
@@ -379,6 +509,11 @@ fn get_accent_color() -> String {
     String::new()
 }
 
+#[cfg(desktop)]
+type BrowserLockState = browser::BrowserLock;
+#[cfg(mobile)]
+type BrowserLockState = ();
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let initial = book_args(&std::env::args().collect::<Vec<_>>(), None);
@@ -423,9 +558,12 @@ pub fn run() {
                     }
                 });
             }
+            #[cfg(all(desktop, debug_assertions))]
+            browser::self_test(_app.handle());
             Ok(())
         })
         .manage(open_files)
+        .manage(BrowserLockState::default())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_dialog::init())
@@ -441,7 +579,14 @@ pub fn run() {
             scan_folder,
             read_folder_file,
             write_folder_file,
-            read_cache_file
+            create_folder_file,
+            delete_folder_file,
+            read_cache_file,
+            browser_load,
+            browser_show,
+            browser_hide,
+            browser_cancel,
+            fetch_image
         ])
         .run(tauri::generate_context!())
         .expect("error while running Readly");

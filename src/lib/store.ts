@@ -9,7 +9,7 @@ import { openBook, parseImport } from './book'
 import { endTask, runTask, startTask, updateTask, useTasks } from './tasks'
 import { setEpubMetadata } from './epubedit'
 import { invalidateCover, loadCover } from './covers'
-import { backgroundPut, isWindowsApp, writeFolderFile } from './native'
+import { backgroundPut, createFolderFile, deleteFolderFile, isWindowsApp, writeFolderFile } from './native'
 import { registerCustomFont, unregisterCustomFont } from './fonts'
 import { dayKey, getDevice, initDevice } from './device'
 import { hashBytes } from './book'
@@ -17,10 +17,13 @@ import {
   entryKey,
   entryName,
   foldersSupported,
+  keyRel,
   listFolder,
   pickFolder,
   readFolderEntry,
   releaseFolder,
+  safeFileName,
+  type FolderDeleteMode,
   type WatchedFolder,
 } from './folders'
 import { tr } from './i18n'
@@ -38,6 +41,29 @@ export interface ImportOptions {
   silent?: boolean
   /** 不为单本失败弹提示（由调用方汇总） */
   quietErrors?: boolean
+}
+
+export interface RemoveOptions {
+  /** 这些书（hash）在书籍文件夹里的原文件也一并删除（仅电脑端、有 Windows 路径的文件夹） */
+  folderFiles?: string[]
+}
+
+export interface RemoveResult {
+  /** 删掉的书籍文件夹文件数 */
+  filesDeleted: number
+  /** 删除失败的文件数 */
+  filesFailed: number
+}
+
+/**
+ * 这本书来自哪个可删除原文件的书籍文件夹（电脑端、有 Windows 路径），以及该文件夹的删除方式。
+ * 不适用时返回 null。
+ */
+export function folderFileOf(rec: BookRecord, folders: WatchedFolder[]): { folder: WatchedFolder; mode: FolderDeleteMode } | null {
+  if (!isWindowsApp || !rec.folderRef) return null
+  const folder = folders.find(f => f.id === rec.folderRef!.folderId)
+  if (!folder?.path) return null
+  return { folder, mode: folder.deleteFiles ?? 'ask' }
 }
 
 interface State {
@@ -74,10 +100,18 @@ interface State {
   pushOnLeave: (timeoutMs?: number) => Promise<void>
   addFolder: () => Promise<void>
   removeFolder: (id: string) => void
+  /** 电脑端：把书架上的其他书（手机上传、云端同步下来的）也存进这个文件夹；同时只能开一个 */
+  setFolderCollect: (id: string, on: boolean) => Promise<void>
+  /** 把还没有文件夹归属的书存进“收集”文件夹 */
+  collectToFolder: () => Promise<void>
   scanFolders: (manual?: boolean) => Promise<void>
+  /** 电脑端：移除书时如何处理这个文件夹里的原文件 */
+  setFolderDeleteMode: (id: string, mode: FolderDeleteMode) => void
+  /** 重新导入文件夹里不在书架上的书（之前在书架上移除、但保留了文件的书；已删除的记录会被恢复） */
+  reimportFolder: (id: string) => Promise<void>
   importFiles: (files: File[], opts?: ImportOptions) => Promise<BookRecord[]>
-  removeBook: (hash: string) => Promise<void>
-  removeBooks: (hashes: string[]) => Promise<void>
+  removeBook: (hash: string, opts?: RemoveOptions) => Promise<RemoveResult>
+  removeBooks: (hashes: string[], opts?: RemoveOptions) => Promise<RemoveResult>
   setLocalOnly: (hash: string, localOnly: boolean) => Promise<void>
   saveProgress: (hash: string, p: Progress) => void
   addBookmark: (hash: string, bm: Omit<Bookmark, 'id' | 'createdAt' | 'updatedAt'>) => void
@@ -93,6 +127,12 @@ interface State {
   editBook: (hash: string, meta: { title: string; author: string }) => Promise<void>
   /** 书籍文件被外部修改：用新文件更新这本书（保留进度、书签、统计） */
   updateBookFile: (hash: string, bytes: Uint8Array, fileName: string, folderRef?: BookRecord['folderRef']) => Promise<void>
+  /** 在线阅读：建一条隐藏的书架记录（已存在则不动），之后用 openReader 打开 */
+  putOnlineRecord: (rec: BookRecord) => void
+  /** 书库：记下这本书来自哪个书源、下载了哪些卷（随书架同步） */
+  setBookSource: (hash: string, source: BookRecord['source']) => void
+  /** 电脑端：书来自书籍文件夹时，把新的文件内容写回文件夹里的原文件（追更后用） */
+  writeBookToFolder: (hash: string, bytes: Uint8Array) => Promise<void>
   updateSettings: (fn: (s: Settings) => Settings) => void
   updateSync: (patch: Partial<SyncConfig>) => void
   testSync: () => Promise<boolean>
@@ -120,6 +160,7 @@ let syncing: Promise<void> | null = null
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 let autoTimer: ReturnType<typeof setInterval> | undefined
 let folderScan: Promise<void> | null = null
+let collecting: Promise<void> | null = null
 /** 当前解析器也无法导入的文件标记；解析器升级时改这个值，失败的书会自动重试一次 */
 const SKIP_MARK = 'skip:v2'
 /** 阅读期间推迟了重活，退出阅读后补做 */
@@ -476,6 +517,69 @@ export const useStore = create<State>((set, get) => {
       persistFolders()
     },
 
+    async setFolderCollect(id, on) {
+      set({
+        folders: get().folders.map(f =>
+          // 同时只能有一个收集文件夹；第一次开启时记下已有的书都还没存过
+          f.id === id ? { ...f, collect: on, exported: f.exported ?? [] } : on ? { ...f, collect: false } : f,
+        ),
+      })
+      persistFolders()
+      if (on) await get().collectToFolder()
+    },
+
+    async collectToFolder() {
+      // 阅读时不做，退出阅读后的同步 / 扫描会再触发
+      if (!isWindowsApp || get().reading) return
+      if (collecting) return collecting
+      collecting = (async () => {
+        // 等扫描结束，避免和扫描同时处理同一个文件
+        if (folderScan) await folderScan
+        const target = get().folders.find(f => f.collect && f.path)
+        if (!target) return
+        const done = new Set(target.exported ?? [])
+        const todo = get().library.filter(b => !b.deletedAt && !b.localOnly && b.hasFile && !b.folderRef && !done.has(b.hash))
+        if (!todo.length) return
+        const known = { ...target.known }
+        const pathMap = { ...target.paths }
+        let added = 0
+        let failed = 0
+        const tid = startTask('scan', tr('存入书籍文件夹「{name}」', { name: target.name }), { total: todo.length, loaded: 0, unit: 'items' })
+        for (const [i, b] of todo.entries()) {
+          updateTask(tid, { loaded: i, detail: b.title })
+          try {
+            const bytes = await readBytes(paths.book(b.hash, b.format))
+            if (!bytes) continue
+            const entry = await createFolderFile(target.path!, safeFileName(b.title, b.format), bytes)
+            known[entryKey(entry)] = b.hash
+            pathMap[entry.rel] = b.hash
+            done.add(b.hash)
+            patchBook(b.hash, x => ({ ...x, folderRef: { folderId: target.id, rel: entry.rel } }))
+            added++
+          } catch (e) {
+            console.warn('存入书籍文件夹失败', b.title, e)
+            failed++
+          }
+          await new Promise(r => setTimeout(r, 0))
+        }
+        endTask(tid)
+        set({
+          folders: get().folders.map(f =>
+            f.id === target.id ? { ...f, known, paths: pathMap, exported: [...done], count: (f.count ?? 0) + added } : f,
+          ),
+        })
+        persistFolders()
+        const parts = [
+          added && tr('存入 {n} 本其他设备的书', { n: added }),
+          failed && tr('{n} 本存入失败', { n: failed }),
+        ].filter(Boolean)
+        if (parts.length) get().showToast(tr('书籍文件夹：{list}', { list: parts.join(isEn() ? ', ' : '，') }))
+      })().finally(() => {
+        collecting = null
+      })
+      return collecting
+    },
+
     async scanFolders(manual = false) {
       if (!foldersSupported || !get().folders.length) return
       // 阅读时不扫描，退出阅读后再补
@@ -484,6 +588,8 @@ export const useStore = create<State>((set, get) => {
         return
       }
       if (folderScan) return folderScan
+      // 正在往收集文件夹里存书：这一轮先不扫，免得把刚写的文件当成新书
+      if (collecting) return
       lastFolderScan = Date.now()
       set({ folderScanning: true })
       folderScan = (async () => {
@@ -586,6 +692,7 @@ export const useStore = create<State>((set, get) => {
       })().finally(() => {
         folderScan = null
         set({ folderScanning: false })
+        setTimeout(() => get().collectToFolder(), 0)
       })
       return folderScan
     },
@@ -616,14 +723,15 @@ export const useStore = create<State>((set, get) => {
       return out
     },
 
-    async removeBook(hash) {
-      return get().removeBooks([hash])
+    async removeBook(hash, opts) {
+      return get().removeBooks([hash], opts)
     },
 
-    async removeBooks(hashes) {
+    async removeBooks(hashes, opts = {}) {
+      const result: RemoveResult = { filesDeleted: 0, filesFailed: 0 }
       const set_ = new Set(hashes)
       const recs = get().library.filter(b => set_.has(b.hash))
-      if (!recs.length) return
+      if (!recs.length) return result
       const now = Date.now()
       await Promise.all(
         recs.flatMap(r => [removeFile(paths.book(r.hash, r.format)).catch(() => {}), removeFile(paths.cover(r.hash)).catch(() => {})]),
@@ -642,6 +750,88 @@ export const useStore = create<State>((set, get) => {
         const e = engine()
         Promise.all(recs.filter(r => !r.localOnly).map(r => e.deleteFile(r))).finally(() => get().runSync())
       }
+
+      // 同时删除书籍文件夹里的原文件（电脑端）
+      const fileSet = new Set(opts.folderFiles ?? [])
+      const withFiles = recs.filter(r => fileSet.has(r.hash) && folderFileOf(r, get().folders))
+      if (withFiles.length) {
+        // 等正在进行的扫描 / 收集结束：它们结束时会用自己的副本覆盖 known / paths，先等它们写完再改
+        if (folderScan) await folderScan.catch(() => {})
+        if (collecting) await collecting.catch(() => {})
+        const removed = new Map<string, { rel: string; hash: string }[]>()
+        for (const r of withFiles) {
+          const hit = folderFileOf(r, get().folders)
+          if (!hit) continue
+          const rel = r.folderRef!.rel
+          // 保险：这个路径现在记着的是另一本书（文件被替换过），就不删，免得误删别的书
+          const owner = hit.folder.paths?.[rel]
+          if (owner && owner !== r.hash) {
+            result.filesFailed++
+            continue
+          }
+          try {
+            await deleteFolderFile(hit.folder.path!, rel)
+            removed.set(hit.folder.id, [...(removed.get(hit.folder.id) ?? []), { rel, hash: r.hash }])
+            result.filesDeleted++
+          } catch (e) {
+            console.warn('删除书籍文件夹里的文件失败', rel, e)
+            result.filesFailed++
+          }
+        }
+        if (removed.size) {
+          // 文件没了：清掉这些文件的扫描记录与“已存入”标记（书以后回到书架时可以再存进来）
+          set({
+            folders: get().folders.map(f => {
+              const list = removed.get(f.id)
+              if (!list) return f
+              const rels = new Set(list.map(x => x.rel))
+              const gone = new Set(list.map(x => x.hash))
+              const known = Object.fromEntries(Object.entries(f.known).filter(([k]) => !rels.has(keyRel(k))))
+              const pathMap = Object.fromEntries(Object.entries(f.paths ?? {}).filter(([rel]) => !rels.has(rel)))
+              return {
+                ...f,
+                known,
+                paths: pathMap,
+                exported: f.exported?.filter(h => !gone.has(h)),
+                count: Math.max(0, (f.count ?? 0) - list.length),
+              }
+            }),
+          })
+          persistFolders()
+          // 已删除记录上的文件夹归属也去掉
+          const gone = new Set([...removed.values()].flat().map(x => x.hash))
+          set({ library: get().library.map(b => (gone.has(b.hash) ? { ...b, folderRef: undefined } : b)) })
+          persistLibrary()
+        }
+      }
+      return result
+    },
+
+    setFolderDeleteMode(id, mode) {
+      set({ folders: get().folders.map(f => (f.id === id ? { ...f, deleteFiles: mode } : f)) })
+      persistFolders()
+    },
+
+    async reimportFolder(id) {
+      // 等正在进行的扫描 / 收集结束，否则它们结束时会把旧的 known 写回来
+      if (folderScan) await folderScan.catch(() => {})
+      if (collecting) await collecting.catch(() => {})
+      const folder = get().folders.find(f => f.id === id)
+      if (!folder) return
+      const live = new Set(get().library.filter(b => !b.deletedAt).map(b => b.hash))
+      // 清掉指向“不在书架上的书”的记录（移除时保留了文件的书、以前导入失败的文件），下次扫描会重新读取这些文件；
+      // 内容与已删除的记录相同时，storeParsed 会去掉 deletedAt，把原来的进度、书签一起恢复
+      const known = Object.fromEntries(Object.entries(folder.known).filter(([, v]) => live.has(v)))
+      const dropped = Object.keys(folder.known).length - Object.keys(known).length
+      if (!dropped) {
+        get().showToast(tr('「{name}」里的书都已在书架上', { name: folder.name }))
+        return
+      }
+      set({ folders: get().folders.map(f => (f.id === id ? { ...f, known } : f)) })
+      persistFolders()
+      // 扫描结束后会顺手启动收集；若此刻正在收集，扫描会被跳过，所以再等一次
+      if (collecting) await collecting.catch(() => {})
+      await get().scanFolders(true)
     },
 
     async setLocalOnly(hash, localOnly) {
@@ -743,6 +933,23 @@ export const useStore = create<State>((set, get) => {
       if (canSync()) get().runSync()
     },
 
+    putOnlineRecord(rec) {
+      if (get().library.some(b => b.hash === rec.hash)) return
+      putBooks([rec])
+    },
+
+    setBookSource(hash, source) {
+      const now = Date.now()
+      // 来源跟着书名作者一起按 metaUpdatedAt 同步
+      patchBook(hash, b => ({ ...b, source, metaUpdatedAt: now, updatedAt: now }))
+      get().syncQuick('push')
+    },
+
+    async writeBookToFolder(hash, bytes) {
+      const rec = get().library.find(b => b.hash === hash)
+      if (rec) await writeBackToFolder(rec, bytes).catch(e => console.warn('写回书籍文件夹失败', e))
+    },
+
     async updateBookFile(hash, bytes, fileName, folderRef) {
       const rec = get().library.find(b => b.hash === hash)
       if (!rec) return
@@ -822,6 +1029,8 @@ export const useStore = create<State>((set, get) => {
           set({ syncStatus: 'ok', lastSyncAt: syncState.lastSyncAt })
           persistSync()
           endTask(taskId)
+          // 同步下来的新书：存一份到电脑的书籍文件夹（OneDrive 等会继续同步）
+          if (!light) setTimeout(() => get().collectToFolder(), 0)
         } catch (e) {
           console.error(e)
           const msg = e instanceof Error ? e.message : String(e)

@@ -135,9 +135,19 @@ class MainActivity : TauriActivity() {
   private var webViewRef: WebView? = null
   private var volumeKeys = false
 
+  /** 书源用的隐藏浏览器（见 SourceBrowser.kt） */
+  private val sourceBrowser by lazy {
+    SourceBrowser(this) { js -> webViewRef?.post { webViewRef?.evaluateJavascript(js, null) } }
+  }
+
   /** 音量键翻页：开启时拦下音量键（不再调节音量），交给前端翻页 */
   override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
     val code = event.keyCode
+    // 书源网页（登录 / 人机验证）盖在最上面时：返回键把它收起
+    if (code == android.view.KeyEvent.KEYCODE_BACK && sourceBrowser.visible) {
+      if (event.action == android.view.KeyEvent.ACTION_UP) sourceBrowser.hide()
+      return true
+    }
     if (volumeKeys && (code == android.view.KeyEvent.KEYCODE_VOLUME_DOWN || code == android.view.KeyEvent.KEYCODE_VOLUME_UP)) {
       if (event.action == android.view.KeyEvent.ACTION_DOWN) {
         val dir = if (code == android.view.KeyEvent.KEYCODE_VOLUME_DOWN) "next" else "prev"
@@ -201,6 +211,47 @@ class MainActivity : TauriActivity() {
   }
 
   inner class Bridge {
+    /** 书源：用隐藏浏览器打开网页；完成后调用 window.__readlyBrowserDone(id)，再用 browserTake(id) 取结果 */
+    @JavascriptInterface
+    fun browserLoad(id: String, url: String, script: String, timeoutMs: Double, desktop: Boolean, action: String, images: Boolean, slot: Double) {
+      if (!url.startsWith("https://") && !url.startsWith("http://")) {
+        // 不能静默忽略：前端在等这个 id 的结果，不回就会一直卡住
+        sourceBrowser.fail(id, "ERR:不是网页地址：$url")
+        return
+      }
+      sourceBrowser.load(id, url, script, timeoutMs.toLong(), desktop, action, images, slot.toInt())
+    }
+
+    @JavascriptInterface
+    fun browserCancel() = sourceBrowser.cancelAll()
+
+    /** 书库下载进行中：text 非空时开启 / 更新前台服务（通知栏进度），空字符串时结束 */
+    @JavascriptInterface
+    fun setBackgroundWork(text: String) {
+      if (text.isEmpty()) {
+        DownloadService.stop(this@MainActivity)
+        // 下载在后台结束了：网页恢复正常的暂停状态，省电
+        if (!resumedNow) runOnUiThread { webViewRef?.onPause() }
+        return
+      }
+      // 安卓 13 起通知要先授权；不授权服务照样能跑，只是看不到通知
+      if (!DownloadService.running && Build.VERSION.SDK_INT >= 33 &&
+        checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED
+      ) runOnUiThread { requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 41) }
+      DownloadService.update(this@MainActivity, text)
+    }
+
+    @JavascriptInterface
+    fun browserTake(id: String): String = sourceBrowser.take(id)
+
+    @JavascriptInterface
+    fun browserShow(url: String, autoClose: Boolean) {
+      if (url.isEmpty() || url.startsWith("https://") || url.startsWith("http://")) sourceBrowser.show(url, autoClose)
+    }
+
+    @JavascriptInterface
+    fun browserHide() = sourceBrowser.hide()
+
     @JavascriptInterface
     fun pickFolder() {
       runOnUiThread { pickTree.launch(null) }
@@ -581,6 +632,22 @@ class MainActivity : TauriActivity() {
   override fun onPause() {
     resumedNow = false
     super.onPause()
+    // wry 在这里调用了 WebView.onPause()，网页会被整个暂停（实测切后台后 JS 完全不跑）。
+    // 书库下载进行中（前台服务开着）就立刻恢复，让下载在后台继续；下载结束、服务关掉后照常暂停。
+    if (DownloadService.running) keepWebAlive()
+  }
+
+  override fun onStop() {
+    super.onStop()
+    if (DownloadService.running) keepWebAlive()
+  }
+
+  /** 后台下载期间：让主网页继续运行（不暂停、计时器照走） */
+  private fun keepWebAlive() {
+    webViewRef?.let {
+      it.onResume()
+      it.resumeTimers()
+    }
   }
 
   override fun onResume() {

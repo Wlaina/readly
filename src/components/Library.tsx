@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { liveCategories, useShelf, useStore, visibleBooks } from '../lib/store'
+import { folderFileOf, liveCategories, useShelf, useStore, visibleBooks } from '../lib/store'
 import { enterReader, formatTime, useDesktopLayout } from '../lib/hooks'
-import { askConfirm } from '../lib/dialog'
+import { askConfirm, askConfirmCheck } from '../lib/dialog'
 import { foldersSupported } from '../lib/folders'
 import { fuzzyFilter } from '../lib/fuzzy'
 import { pushOverlay } from '../lib/overlay'
@@ -17,7 +17,7 @@ import Presence from './Presence'
 import Sheet from './Sheet'
 import { haptic, isWindowsApp, revealBook } from '../lib/native'
 import { cancelLongPress, consumeLongPress, longPress } from '../lib/longpress'
-import { tr } from '../lib/i18n'
+import { isEn, tr } from '../lib/i18n'
 
 const coarse = typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches
 /** contextmenu 是否由手指长按触发（Chrome/WebView 里它是 PointerEvent） */
@@ -63,7 +63,9 @@ const nearest = (levels: number[], v: number) => levels.reduce((a, b) => (Math.a
 
 export default function Library() {
   // 阅读时这些数据冻结（见 useShelf）：翻页保存进度不会让整个书架跟着重新计算
-  const library = useShelf(s => s.library)
+  // 在线阅读的书（隐藏记录）不放在书架上
+  const allBooks = useShelf(s => s.library)
+  const library = useMemo(() => allBooks.filter(b => !b.online), [allBooks])
   const syncStatus = useShelf(s => s.syncStatus)
   const lastSyncAt = useShelf(s => s.lastSyncAt)
   const syncEnabled = useStore(s => s.sync.enabled)
@@ -241,15 +243,52 @@ export default function Library() {
   const removeChosen = async (recs: BookRecord[]) => {
     if (!recs.length) return
     const synced = syncEnabled && recs.some(r => !r.localOnly)
-    const ok = await askConfirm({
-      title: recs.length === 1 ? tr('移除《{title}》？', { title: recs[0].title }) : tr('移除选中的 {n} 本书？', { n: recs.length }),
-      message: synced ? tr('其他设备也会同步移除（你手动放进云端或书籍文件夹的原文件不会被删除）。') : tr('本机的书籍文件会被删除。'),
-      okText: tr('移除'),
-      danger: true,
-    })
-    if (!ok) return
-    await useStore.getState().removeBooks(recs.map(r => r.hash))
-    useStore.getState().showToast(tr('已移除 {n} 本书', { n: recs.length }))
+    const title = recs.length === 1 ? tr('移除《{title}》？', { title: recs[0].title }) : tr('移除选中的 {n} 本书？', { n: recs.length })
+    // 电脑端：来自书籍文件夹的书，按各文件夹的设置决定是否一并删除原文件（每次询问 / 总是 / 从不）
+    const allFolders = useStore.getState().folders
+    const inFolder = recs.map(r => ({ r, hit: folderFileOf(r, allFolders) })).filter(x => x.hit)
+    const always = inFolder.filter(x => x.hit!.mode === 'always').map(x => x.r.hash)
+    const askable = inFolder.filter(x => x.hit!.mode === 'ask').map(x => x.r.hash)
+    let folderFiles = always
+    if (!inFolder.length) {
+      const ok = await askConfirm({
+        title,
+        message: synced ? tr('其他设备也会同步移除（你手动放进云端或书籍文件夹的原文件不会被删除）。') : tr('本机的书籍文件会被删除。'),
+        okText: tr('移除'),
+        danger: true,
+      })
+      if (!ok) return
+    } else {
+      const base = synced ? tr('其他设备也会同步移除。') : tr('本机的书籍文件会被删除。')
+      const extra = always.length ? tr('按设置，书籍文件夹里的 {n} 个原文件会一起删除。', { n: always.length }) : ''
+      const { ok, checked } = await askConfirmCheck({
+        title,
+        message: extra ? `${base}${isEn() ? ' ' : ''}${extra}` : base,
+        okText: tr('移除'),
+        danger: true,
+        check: askable.length
+          ? {
+              label:
+                askable.length === 1 && recs.length === 1
+                  ? tr('同时删除书籍文件夹里的文件')
+                  : tr('同时删除书籍文件夹里的 {n} 个文件', { n: askable.length }),
+              hint: tr('文件会被直接删除，不进回收站（OneDrive 等同步盘可在网页版回收站找回）。可在 设置 → 书籍文件夹 里改成总是一起删除或只删书架上的。'),
+            }
+          : undefined,
+      })
+      if (!ok) return
+      if (checked) folderFiles = [...always, ...askable]
+    }
+    const res = await useStore.getState().removeBooks(recs.map(r => r.hash), { folderFiles })
+    useStore
+      .getState()
+      .showToast(
+        res.filesFailed
+          ? tr('已移除 {n} 本书，{m} 个书籍文件夹里的文件删除失败', { n: recs.length, m: res.filesFailed })
+          : res.filesDeleted
+            ? tr('已移除 {n} 本书，并删除了书籍文件夹里的 {m} 个文件', { n: recs.length, m: res.filesDeleted })
+            : tr('已移除 {n} 本书', { n: recs.length }),
+      )
     exitSelect()
   }
 

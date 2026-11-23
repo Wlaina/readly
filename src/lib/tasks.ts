@@ -18,7 +18,17 @@ export interface Task {
   error?: string
   startedAt: number
   endedAt?: number
+  /** 已暂停（只有支持暂停的任务会有） */
+  paused?: boolean
 }
+
+/** 可以操作的任务（例如书库下载）：任务 id → 取消 / 暂停 / 继续 */
+export interface TaskControl {
+  cancel?: () => void
+  pause?: () => void
+  resume?: () => void
+}
+export const taskControls = new Map<string, TaskControl>()
 
 interface TaskState {
   tasks: Task[]

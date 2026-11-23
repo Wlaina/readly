@@ -10,7 +10,7 @@ export interface DockTab<T extends string> {
   icon: (p: React.SVGProps<SVGSVGElement>) => React.ReactElement
 }
 
-const ITEM_W = 76 // 底部横排时每项宽度
+// 底部横排时每项最宽 76px；项数多、屏幕窄时由 CSS 平均缩小（--dock-n），这里按实际宽度换算
 const ITEM_H = 64 // 电脑左侧竖排时每项高度
 const PAD = 6
 const HOLD_MS = 150
@@ -56,7 +56,7 @@ export default function Dock<T extends string>({
 
   const indexAt = (x: number, y: number) => {
     const r = ref.current!.getBoundingClientRect()
-    const i = side ? Math.floor((y - r.top - PAD) / ITEM_H) : Math.floor((x - r.left - PAD) / ITEM_W)
+    const i = side ? Math.floor((y - r.top - PAD) / ITEM_H) : Math.floor(((x - r.left - PAD) / (r.width - PAD * 2)) * tabs.length)
     return Math.min(tabs.length - 1, Math.max(0, i))
   }
   /** 滑到新的一项：震动一下并立刻切页 */
@@ -90,7 +90,7 @@ export default function Dock<T extends string>({
     <nav
       ref={ref}
       className={`dock glass ${side ? 'side' : ''} ${scrub ? 'scrubbing' : ''}`}
-      style={{ '--i': shown } as React.CSSProperties}
+      style={{ '--i': shown, '--dock-n': tabs.length } as React.CSSProperties}
       onPointerDown={e => {
         if (e.button !== 0 || (e.target as Element).closest('.dock-extra')) return
         try {

@@ -32,6 +32,23 @@ export async function writeFolderFile(root: string, rel: string, bytes: Uint8Arr
   })
 }
 
+/**
+ * 在书籍文件夹里新建一本书（仅电脑端，不覆盖已有文件，重名自动加序号）。
+ * 返回实际写入的文件信息。
+ */
+export async function createFolderFile(root: string, name: string, bytes: Uint8Array) {
+  const { invoke } = await import('@tauri-apps/api/core')
+  return invoke<{ rel: string; size: number; mtime: number }>('create_folder_file', bytes, {
+    headers: { 'x-root': encodeURIComponent(root), 'x-rel': encodeURIComponent(name) },
+  })
+}
+
+/** 删除书籍文件夹里的一本书（仅电脑端；只能删文件夹内部的 epub / txt，文件已不存在也算成功） */
+export async function deleteFolderFile(root: string, rel: string) {
+  const { invoke } = await import('@tauri-apps/api/core')
+  await invoke('delete_folder_file', { root, rel })
+}
+
 /** 全屏开关：Tauri 用窗口全屏，浏览器用 Fullscreen API。返回切换后的状态 */
 export async function toggleFullscreen(): Promise<boolean> {
   if (isTauri) {

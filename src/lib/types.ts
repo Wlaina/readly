@@ -54,6 +54,19 @@ export interface Category {
   deleted?: boolean
 }
 
+/** 从书库（在线书源）下载的书：来自哪个书源的哪本书，已经下载了哪些卷（追更时对比） */
+export interface SourceRef {
+  kind: string
+  id: string
+  volumes: { id: string; title: string; chapters: number }[]
+  /** 上次下载 / 追更合并的时间 */
+  mergedAt: number
+  /** 上次检查更新的时间与结果（新卷数、最后一卷新章节数） */
+  checkedAt?: number
+  newVolumes?: number
+  newChapters?: number
+}
+
 export interface BookRecord {
   /** 文件内容 SHA-256 前 32 位，跨设备唯一标识 */
   hash: string
@@ -92,8 +105,20 @@ export interface BookRecord {
   fileRevLocal?: number
   /** 本机修改了书籍文件，等待上传（本机字段） */
   pendingUpload?: boolean
+  /**
+   * 已经真正上传到云端的文件版本（本机字段）。新文件还没传上去时，对外只公布这个版本号，
+   * 免得其他设备抢先下载到旧文件、却当成新版本记下来（之后就再也不会更新）
+   */
+  fileRevUploaded?: number
   /** 来自哪个书籍文件夹的哪个文件（本机字段），用于把编辑写回原文件 */
   folderRef?: { folderId: string; rel: string }
+  /** 从书库下载的书的来源（随书架同步） */
+  source?: SourceRef
+  /**
+   * 在线阅读的书（不下载，用主阅读器边读边抓）：书架上不显示、只存在本机（localOnly），
+   * 进度、书签、笔记、统计都记在这条记录上，和本地书一样
+   */
+  online?: { kind: string; id: string }
   /** 仅本机阅读，不参与任何云同步 */
   localOnly?: boolean
   /** 书籍文件在 WebDAV 上的位置（手动放入云端目录的书），缺省为 files/<hash>.<ext> */
