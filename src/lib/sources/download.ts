@@ -34,7 +34,8 @@ export async function fetchImage(url: string, referer: string): Promise<EpubImag
 }
 
 /**
- * 把一张图变成封面：竖向的直接用；横向的跨页书封（封底 + 书脊 + 封面连在一起）裁出右侧的正封面；
+ * 把一张图变成封面：竖向的直接用；横向的跨页书封裁出正封面。日式轻小说从右往左翻，
+ * 书封摊开是“封面 + 书脊 + 封底”，正封面在左侧（右侧是印着简介的封底）；
  * 其他（太小、比例奇怪）返回 null
  */
 export async function asCover(img: EpubImage): Promise<EpubImage | null> {
@@ -48,7 +49,7 @@ export async function asCover(img: EpubImage): Promise<EpubImage | null> {
     }
     const cw = Math.round(h / 1.42)
     const canvas = new OffscreenCanvas(cw, h)
-    canvas.getContext('2d')!.drawImage(bmp, w - cw, 0, cw, h, 0, 0, cw, h)
+    canvas.getContext('2d')!.drawImage(bmp, 0, 0, cw, h, 0, 0, cw, h)
     bmp.close()
     const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.92 })
     return { bytes: new Uint8Array(await blob.arrayBuffer()), type: 'image/jpeg' }
