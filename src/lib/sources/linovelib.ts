@@ -56,21 +56,37 @@ const CAPTCHA_IMAGE = `(function(){ var i = document.querySelector('img[src*="ch
  * 连续失败几次（例如网站开始要求人机验证）就暂时改回隐藏网页
  */
 let httpFailures = 0
-const HTTP_GAP = 250
+/** 实测网站大约每秒只许一次请求（连续更快会回 429），几章同时下载也共用这个间隔 */
+const HTTP_GAP = 1100
+const wait = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve, reject) => {
+    const t = setTimeout(resolve, ms)
+    signal?.addEventListener('abort', () => (clearTimeout(t), reject(new DOMException('cancelled', 'AbortError'))), { once: true })
+  })
 async function httpDoc(url: string, selector: string, signal?: AbortSignal): Promise<Document | null> {
   if (httpFailures >= 3) return null
-  try {
-    const { doc } = await fetchPage(url, signal, HTTP_GAP)
-    if (!doc.querySelector(selector)) throw new Error('页面结构不对')
-    httpFailures = 0
-    return doc
-  } catch (e) {
-    if (signal?.aborted) throw e
-    // 过一会儿再给 HTTP 一次机会
-    if (++httpFailures >= 3) setTimeout(() => (httpFailures = 0), 5 * 60_000)
-    console.warn('直接请求失败，改用网页', url, e)
-    return null
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const { doc } = await fetchPage(url, signal, HTTP_GAP)
+      if (!doc.querySelector(selector)) throw new Error('页面结构不对')
+      httpFailures = 0
+      return doc
+    } catch (e) {
+      if (signal?.aborted) throw e
+      // 太快被限流：歇一会儿再直接请求（换成网页也一样会被限）
+      if (/429/.test(String(e)) && attempt < 4) {
+        await wait(10_000 * (attempt + 1), signal)
+        continue
+      }
+      return httpFailed(url, e)
+    }
   }
+}
+function httpFailed(url: string, e: unknown): null {
+  // 连续失败几次就先用网页；过一会儿再给 HTTP 一次机会
+  if (++httpFailures >= 3) setTimeout(() => (httpFailures = 0), 5 * 60_000)
+  console.warn('直接请求失败，改用网页', url, e)
+  return null
 }
 
 /** 一页正文（HTTP 取回的 HTML）：段落按章节号还原顺序，插图留在原来的位置 */

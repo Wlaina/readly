@@ -119,6 +119,7 @@ export default function SourcesPage() {
   /** 换源途中要先输验证码 / 登录：搜到结果后自动接着完成切换 */
   const pendingSwitch = useRef<{ rec: BookRecord; other: BookSource } | null>(null)
   const [switching, setSwitching] = useState<string | null>(null)
+  const resultsRef = useRef<HTMLDivElement>(null)
 
   const show = (r: SearchOutcome) => {
     if ('captcha' in r) {
@@ -203,7 +204,8 @@ export default function SourcesPage() {
       setQ(rec.title)
       show(r)
       if ('hits' in r) showToast(tr('在{name}没认出这本书，请在搜索结果里点开它', { name: tr(other.name) }))
-      window.scrollTo({ top: 0, behavior: 'smooth' })
+      // 验证码 / 登录卡片在页面下方：滚过去
+      setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 120)
     } catch (e) {
       showToast(tr('换源失败：{e}', { e: errText(e) }))
     } finally {
@@ -360,10 +362,7 @@ export default function SourcesPage() {
                                 .join('，')}
                             </span>
                           )}
-                          <span className="muted">
-                            {tr('从{name}追更', { name: from ? tr(from.name) : b.source!.kind })}
-                            {upd ? tr(' · 点开可以追加，进度和书签都保留') : ''}
-                          </span>
+                          <span className="muted">{tr('从{name}追更', { name: from ? tr(from.name) : b.source!.kind })}</span>
                         </div>
                       </button>
                       {other && (
@@ -382,6 +381,7 @@ export default function SourcesPage() {
               </div>
             )}
 
+            <div ref={resultsRef} className="src-results-anchor" />
             {view.kind === 'loading' && <div className="src-state">{tr('正在打开网站…')}</div>}
             {view.kind === 'error' && <div className="src-state error">{tr('出错了：{e}', { e: view.message })}</div>}
             {view.kind === 'idle' && (

@@ -61,6 +61,12 @@ class SourceBrowser(private val activity: Activity, private val notify: (String)
       w.settings.javaScriptEnabled = true
       w.settings.domStorageEnabled = true
       w.settings.loadsImagesAutomatically = false
+      // 登录页等是电脑版网页：按网页宽度排好再缩小到屏幕宽，可以双指放大
+      w.settings.useWideViewPort = true
+      w.settings.loadWithOverviewMode = true
+      w.settings.setSupportZoom(true)
+      w.settings.builtInZoomControls = true
+      w.settings.displayZoomControls = false
       w.webViewClient = BlockingClient()
       CookieManager.getInstance().setAcceptCookie(true)
       CookieManager.getInstance().setAcceptThirdPartyCookies(w, true)
