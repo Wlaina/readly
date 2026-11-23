@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import Sheet from './Sheet'
 import { IconCheck, IconDownload, IconSearch, IconX } from './icons'
 import { tr } from '../lib/i18n'
@@ -10,7 +10,7 @@ import { linovelib } from '../lib/sources/linovelib'
 import type { BookSource, SearchHit, SearchOutcome, SourceBook, SourceVolume } from '../lib/sources/types'
 import { pushOverlay } from '../lib/overlay'
 import { loadCover, peekCover } from '../lib/covers'
-import { checkUpdates, planUpdate, shelfBookOf, sourceBooks, useUpdateCheck } from '../lib/sources/update'
+import { checkUpdates, crossRef, findShelfBook, planUpdate, sourceBooks, sourceOf, useUpdateCheck } from '../lib/sources/update'
 import OnlineShelf from './OnlineShelf'
 import { openOnlineInReader } from '../lib/sources/onlinebook'
 import { toggleOnlineShelf, useOnShelf } from '../lib/sources/online'
@@ -382,10 +382,14 @@ function BookSheet({ source, id, onClose }: { source: BookSource; id: string; on
   const dl = useDownloads(s => s.list.find(d => d.key === key))
   const [fullDesc, setFullDesc] = useState(false)
   const showToast = useStore(s => s.showToast)
-  // 书架上已经有这本书（以前从书库下载过）：只能追加新内容
-  const shelf = useStore(s => shelfBookOf(s.library, source.id, id))
+  // 书架上已经有这本书（以前从书库下载过，可能是从另一个书源）：只能追加新内容
+  const library = useStore(s => s.library)
+  const match = useMemo(() => findShelfBook(library, source.id, id, book ?? undefined), [library, source.id, id, book])
+  const shelf = match?.rec
+  const cross = shelf && match.cross && book ? { shelfTitle: shelf.title, remoteTitle: book.title } : undefined
+  const fromName = shelf?.source ? (sourceOf(shelf.source.kind)?.name ?? shelf.source.kind) : ''
   const onlineShelved = useOnShelf(source.id, id)
-  const plan = shelf?.source && vols ? planUpdate(shelf.source, vols) : null
+  const plan = shelf?.source && vols ? planUpdate(shelf.source, vols, cross) : null
 
   useEffect(() => {
     let alive = true
@@ -398,11 +402,12 @@ function BookSheet({ source, id, onClose }: { source: BookSource; id: string; on
         if (!alive) return
         setVols(v)
         // 书架上已有这本书：默认只勾可以追加的新卷
-        const have = shelfBookOf(useStore.getState().library, source.id, id)
-        const p = have?.source ? planUpdate(have.source, v) : null
+        const m = findShelfBook(useStore.getState().library, source.id, id, b)
+        const have = m?.rec
+        const p = have?.source ? planUpdate(have.source, v, m?.cross ? { shelfTitle: have.title, remoteTitle: b.title } : undefined) : null
         setPick(new Set(v.map((_, i) => i).filter(i => !p || p.status[i] === 'new')))
-        // 顺手记下检查结果（书库页的“有更新”标记跟着刷新）
-        if (have?.source && p)
+        // 顺手记下检查结果（书库页的“有更新”标记跟着刷新；换书源看到的不算）
+        if (have?.source && p && !m?.cross)
           useStore.getState().setBookSource(have.hash, {
             ...have.source,
             checkedAt: Date.now(),
@@ -428,9 +433,16 @@ function BookSheet({ source, id, onClose }: { source: BookSource; id: string; on
   const start = () => {
     if (!book || !chapters) return
     showToast(tr('开始下载，进度显示在书库页面上方'))
-    downloadToShelf(source, book, chosen, shelf ? { hash: shelf.hash, toLast } : undefined).catch(
+    downloadToShelf(source, book, chosen, shelf ? { hash: shelf.hash, toLast, remote: cross ? (vols ?? undefined) : undefined } : undefined).catch(
       e => e?.name !== 'AbortError' && showToast(tr('下载失败：{e}', { e: errText(e) })),
     )
+  }
+
+  /** 换书源：以后从这个书源检查更新（不下载） */
+  const follow = () => {
+    if (!shelf?.source || !book || !vols || !cross) return
+    useStore.getState().setBookSource(shelf.hash, crossRef(shelf.source, shelf.title, source.id, id, vols, book.title))
+    showToast(tr('《{title}》以后从{name}检查更新', { title: shelf.title, name: source.name }))
   }
 
   return (
@@ -476,7 +488,18 @@ function BookSheet({ source, id, onClose }: { source: BookSource; id: string; on
             </div>
             {shelf && (
               <div className="src-merge-note">
-                {tr('书架上已有这本书（《{title}》）。新的内容会追加到它的末尾，阅读进度、书签和笔记都保留。', { title: shelf.title })}
+                {cross
+                  ? tr('书架上已有这本书（《{title}》，从{from}下载）。已有的卷按卷号对应；勾选的卷会从{name}下载，追加到书的末尾，阅读进度、书签和笔记都保留，以后改从{name}检查更新。', {
+                      title: shelf.title,
+                      from: fromName,
+                      name: source.name,
+                    })
+                  : tr('书架上已有这本书（《{title}》）。新的内容会追加到它的末尾，阅读进度、书签和笔记都保留。', { title: shelf.title })}
+                {cross && (
+                  <button className="btn ghost src-follow" onClick={follow}>
+                    {tr('只改从{name}检查更新', { name: source.name })}
+                  </button>
+                )}
                 {!!toLast.length && (
                   <b>
                     {tr('最后一卷新出了 {n} 章，会一起追加。', {

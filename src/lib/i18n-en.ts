@@ -805,4 +805,7 @@ export const EN: Record<string, string | ((v: V) => string)> = {
   '已是最新': 'Up to date',
   '加入书架（{v} 卷 {c} 章）': 'Add to library ({v} volumes, {c} chapters)',
   '下载中，可以关掉这里继续做别的事；进度显示在书库页面上方。': 'Downloading. You can close this and do something else; progress is shown at the top of the Sources page.',
+  '书架上已有这本书（《{title}》，从{from}下载）。已有的卷按卷号对应；勾选的卷会从{name}下载，追加到书的末尾，阅读进度、书签和笔记都保留，以后改从{name}检查更新。': 'This book is already in your library (“{title}”, downloaded from {from}). Volumes are matched by number; the ones you check will be downloaded from {name} and added to the end, keeping your progress, bookmarks and notes. Future updates will be checked on {name}.',
+  '只改从{name}检查更新': 'Just check updates on {name} from now on',
+  '《{title}》以后从{name}检查更新': '“{title}” will now check for updates on {name}',
 }

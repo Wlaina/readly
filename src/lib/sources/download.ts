@@ -14,6 +14,7 @@ import { BROWSER_SLOTS, cancelBrowser } from './browser'
 import { appendEpub, buildEpub, imageType, readManifest, type EpubImage, type EpubVolume, type SourceManifest } from './epub'
 import type { BookSource, ChapterContent, SourceBook, SourceChapter, SourceVolume } from './types'
 import type { BookRecord, SourceRef } from '../types'
+import { volKey } from './update'
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 const aborted = () => new DOMException('cancelled', 'AbortError')
@@ -196,7 +197,16 @@ async function withRetry<T>(fn: () => Promise<T>, signal: AbortSignal, times = 3
  * - 传 merge（追更）：把最后一卷新出的章节（merge.toLast）和新的卷（volumes）追加到书架上已有的那本书末尾，
  *   书架记录不变（阅读进度、书签、笔记都保留），新文件照常同步到其他设备。
  */
-export async function downloadToShelf(src: BookSource, book: SourceBook, volumes: SourceVolume[], merge?: { hash: string; toLast: SourceChapter[] }) {
+/**
+ * merge：追加到书架上已有的书。remote：这个书源上的完整目录——书原本是从另一个书源下载的（换书源追加）时要传，
+ * 用来把书里已有的卷按卷号对应到这个书源，以后改按这个书源检查更新
+ */
+export async function downloadToShelf(
+  src: BookSource,
+  book: SourceBook,
+  volumes: SourceVolume[],
+  merge?: { hash: string; toLast: SourceChapter[]; remote?: SourceVolume[] },
+) {
   const key = `${src.id}:${book.id}`
   if (activeDownloads.has(key)) throw new Error(tr('这本书正在下载'))
   const ctrl = new AbortController()
@@ -323,8 +333,21 @@ export async function downloadToShelf(src: BookSource, book: SourceBook, volumes
       const cur = store.library.find(b => b.hash === merge.hash && !b.deletedAt)
       if (!cur) throw new Error(tr('书架上找不到这本书了'))
       const old = await store.loadBookFile(cur)
-      const manifest = readManifest(old)
+      let manifest = readManifest(old)
       if (!manifest) throw new Error(tr('这本书不是从书库下载的，没法追更'))
+      // 换书源：已有的卷按卷号换成这个书源上的卷，以后按这个书源追更
+      if (manifest.source !== src.id || manifest.id !== book.id) {
+        const remote = merge.remote ?? []
+        const keys = remote.map(v => volKey(v.title, book.title))
+        manifest = {
+          source: src.id,
+          id: book.id,
+          volumes: manifest.volumes.map(v => {
+            const r = remote[keys.indexOf(volKey(v.title, cur.title))]
+            return r ? volEntry(r) : v
+          }),
+        }
+      }
       const last = manifest.volumes[manifest.volumes.length - 1]
       const merged: SourceManifest = {
         ...manifest,
