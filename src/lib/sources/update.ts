@@ -118,24 +118,36 @@ export function sameBook(a: { title: string; author: string }, b: { title: strin
 }
 
 /**
- * 网站上的卷对应到书里已有的哪一卷。同一个书源按卷 id；换了书源（cross）按卷号 / 卷名。
- * bookTitles：书里的书名、网站上的书名（卷名里常带着书名，比较前去掉）
+ * 网站上的卷对应到书里已有的哪一卷。同一个书源先按卷 id；对不上的（例如换过书源、书里记的还是另一个书源的卷 id）
+ * 再按卷号 / 卷名。换了书源（cross）只按卷号 / 卷名。
+ * titles：书里的书名、网站上的书名（卷名里常带着书名，比较前去掉）
  */
-function matchVolumes(ref: SourceRef, remote: SourceVolume[], cross?: { shelfTitle: string; remoteTitle: string }) {
-  if (!cross) return remote.map(v => ref.volumes.findIndex(r => sameVol(r, v)))
-  const keys = ref.volumes.map(r => volKey(r.title, cross.shelfTitle))
-  return remote.map(v => keys.indexOf(volKey(v.title, cross.remoteTitle)))
+function matchVolumes(ref: SourceRef, remote: SourceVolume[], titles?: VolTitles, cross = false) {
+  const idx = remote.map(v => (cross ? -1 : ref.volumes.findIndex(r => sameVol(r, v))))
+  if (!titles) return idx
+  const used = new Set(idx.filter(x => x >= 0))
+  const keys = ref.volumes.map(r => volKey(r.title, titles.shelfTitle))
+  return idx.map((x, i) => {
+    if (x >= 0) return x
+    const k = volKey(remote[i].title, titles.remoteTitle)
+    const j = keys.findIndex((kk, n) => kk === k && !used.has(n))
+    if (j >= 0) used.add(j)
+    return j
+  })
 }
 
-export function planUpdate(ref: SourceRef, remote: SourceVolume[], cross?: { shelfTitle: string; remoteTitle: string }): UpdatePlan {
-  const idx = matchVolumes(ref, remote, cross)
+export type VolTitles = { shelfTitle: string; remoteTitle: string }
+
+export function planUpdate(ref: SourceRef, remote: SourceVolume[], titles?: VolTitles, cross = false): UpdatePlan {
+  const idx = matchVolumes(ref, remote, titles, cross)
   const lastHave = Math.max(-1, ...idx.map((x, i) => (x >= 0 ? i : -1)))
   const status = remote.map((_, i) => (idx[i] >= 0 ? 'have' : i > lastHave ? 'new' : 'gap')) as UpdatePlan['status']
   let toLast: SourceChapter[] = []
   if (lastHave >= 0) {
     const known = ref.volumes[idx[lastHave]].chapters
-    // 只有书里的最后一卷能接新章节（换了书源时两边分章不一样，不接）
-    if (!cross && idx[lastHave] === ref.volumes.length - 1) toLast = remote[lastHave].chapters.slice(known)
+    // 只有书里的最后一卷能接新章节（按卷号对上的两边分章可能不一样，不接）
+    const sameId = sameVol(ref.volumes[idx[lastHave]], remote[lastHave])
+    if (!cross && sameId && idx[lastHave] === ref.volumes.length - 1) toLast = remote[lastHave].chapters.slice(known)
   }
   return {
     status,
@@ -143,6 +155,22 @@ export function planUpdate(ref: SourceRef, remote: SourceVolume[], cross?: { she
     toLast,
     newVolumes: remote.filter((_, i) => status[i] === 'new'),
   }
+}
+
+/**
+ * 书架记录上的卷 id 和网站对不上、但卷号对得上的（换过书源留下的旧卷 id）：换成网站上的卷 id，
+ * 以后按 id 就能认出来。没有要改的返回 null
+ */
+export function healRef(ref: SourceRef, remote: SourceVolume[], titles: VolTitles): SourceRef | null {
+  const idx = matchVolumes(ref, remote, titles)
+  let changed = false
+  const volumes = ref.volumes.map((v, n) => {
+    const i = idx.indexOf(n)
+    if (i < 0 || remote[i].id === v.id) return v
+    changed = true
+    return { ...v, id: remote[i].id }
+  })
+  return changed ? { ...ref, volumes } : null
 }
 
 /** 书架上从书库下载的书 */
@@ -210,14 +238,15 @@ export async function checkUpdates(onlyStale = false) {
       if (!src) continue
       try {
         const remote = await src.getVolumes(ref.id)
-        const plan = planUpdate(ref, remote)
+        const plan = planUpdate(ref, remote, { shelfTitle: b.title, remoteTitle: b.title })
         const cur = useStore.getState().library.find(x => x.hash === b.hash)
         if (!cur?.source) continue
+        const healed = healRef(cur.source, remote, { shelfTitle: b.title, remoteTitle: b.title })
         const newVolumes = plan.newVolumes.length
         const newChapters = plan.toLast.length
         if (newVolumes || newChapters) found++
         useStore.getState().setBookSource(b.hash, {
-          ...cur.source,
+          ...(healed ?? cur.source),
           checkedAt: Date.now(),
           newVolumes,
           newChapters,

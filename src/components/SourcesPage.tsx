@@ -11,7 +11,7 @@ import type { BookSource, SearchHit, SearchOutcome, SourceBook, SourceVolume } f
 import type { BookRecord } from '../lib/types'
 import { pushOverlay } from '../lib/overlay'
 import { loadCover, peekCover } from '../lib/covers'
-import { checkUpdates, crossRef, findShelfBook, planUpdate, sameBook, sourceBooks, sourceOf, tidyPlan, useUpdateCheck } from '../lib/sources/update'
+import { checkUpdates, crossRef, findShelfBook, healRef, planUpdate, sameBook, sourceBooks, sourceOf, tidyPlan, useUpdateCheck } from '../lib/sources/update'
 import OnlineShelf from './OnlineShelf'
 import { openOnlineInReader } from '../lib/sources/onlinebook'
 import { toggleOnlineShelf, useOnShelf } from '../lib/sources/online'
@@ -476,7 +476,7 @@ function BookSheet({ source, id, onClose }: { source: BookSource; id: string; on
   const cross = shelf && match.cross && book ? { shelfTitle: shelf.title, remoteTitle: book.title } : undefined
   const fromName = shelf?.source ? (sourceOf(shelf.source.kind)?.name ?? shelf.source.kind) : ''
   const onlineShelved = useOnShelf(source.id, id)
-  const plan = shelf?.source && vols ? planUpdate(shelf.source, vols, cross) : null
+  const plan = shelf?.source && vols ? planUpdate(shelf.source, vols, book ? { shelfTitle: shelf.title, remoteTitle: book.title } : undefined, !!cross) : null
   // 书里有重复的卷、卷名样式不统一：可以一键整理
   const tidy = shelf?.source ? tidyPlan(shelf.source.volumes, shelf.title) : null
   const [tidying, setTidying] = useState(false)
@@ -505,12 +505,14 @@ function BookSheet({ source, id, onClose }: { source: BookSource; id: string; on
         // 书架上已有这本书：默认只勾可以追加的新卷
         const m = findShelfBook(useStore.getState().library, source.id, id, b)
         const have = m?.rec
-        const p = have?.source ? planUpdate(have.source, v, m?.cross ? { shelfTitle: have.title, remoteTitle: b.title } : undefined) : null
+        const titles = have ? { shelfTitle: have.title, remoteTitle: b.title } : undefined
+        const p = have?.source ? planUpdate(have.source, v, titles, !!m?.cross) : null
         setPick(new Set(v.map((_, i) => i).filter(i => !p || p.status[i] !== 'have')))
         // 顺手记下检查结果（书库页的“有更新”标记跟着刷新；换书源看到的不算）
         if (have?.source && p && !m?.cross)
           useStore.getState().setBookSource(have.hash, {
-            ...have.source,
+            // 记录上留着换书源前的旧卷 id 的：顺手换成这个书源的
+            ...(healRef(have.source, v, titles!) ?? have.source),
             checkedAt: Date.now(),
             newVolumes: p.newVolumes.length,
             newChapters: p.toLast.length,
@@ -542,7 +544,7 @@ function BookSheet({ source, id, onClose }: { source: BookSource; id: string; on
         const j = plan.status.findIndex((st, k) => k > i && st === 'have')
         if (j >= 0) before[v.id] = plan.idx[j]
       })
-    downloadToShelf(source, book, chosen, shelf ? { hash: shelf.hash, toLast, remote: cross ? (vols ?? undefined) : undefined, before } : undefined).catch(
+    downloadToShelf(source, book, chosen, shelf ? { hash: shelf.hash, toLast, remote: vols ?? undefined, before } : undefined).catch(
       e => e?.name !== 'AbortError' && showToast(tr('下载失败：{e}', { e: errText(e) })),
     )
   }

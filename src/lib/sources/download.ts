@@ -343,19 +343,20 @@ export async function downloadToShelf(
       if (!read) throw new Error(tr('这本书不是从书库下载的，没法追更'))
       // 旧的书没记每卷的文件序号：那时只会往末尾追加，序号就是卷的位置
       let manifest: SourceManifest = { ...read, volumes: read.volumes.map((v, i) => ({ ...v, file: v.file ?? i })) }
-      // 换书源：已有的卷按卷号换成这个书源上的卷，以后按这个书源追更
-      if (manifest.source !== src.id || manifest.id !== book.id) {
-        const remote = merge.remote ?? []
-        const keys = remote.map(v => volKey(v.title, book.title))
-        manifest = {
-          source: src.id,
-          id: book.id,
-          volumes: manifest.volumes.map(v => {
-            const r = remote[keys.indexOf(volKey(v.title, cur.title))]
-            // 卷名保留书里原来的（只换成新书源的卷 id 和章节）
-            return r ? { ...volEntry(r), title: v.title, file: v.file } : v
-          }),
-        }
+      // 换书源（或以前换过、书里还记着另一个书源的卷 id）：已有的卷按卷号换成这个书源上的卷，以后按这个书源追更
+      const remote = merge.remote ?? []
+      const ids = new Set(remote.map(v => v.id))
+      const keys = remote.map(v => volKey(v.title, book.title))
+      const sameSrc = manifest.source === src.id && manifest.id === book.id
+      manifest = {
+        source: src.id,
+        id: book.id,
+        volumes: manifest.volumes.map(v => {
+          if (sameSrc && ids.has(v.id)) return v
+          const r = remote[keys.indexOf(volKey(v.title, cur.title))]
+          // 卷名保留书里原来的（只换成新书源的卷 id 和章节）
+          return r ? { ...volEntry(r), title: v.title, file: v.file } : v
+        }),
       }
       // 原来的封面是小缩略图（例如以前下载的书）而现在有更清楚的：顺手换掉
       const oldCover = Object.entries(unzipSync(old, { filter: f => /^OEBPS\/images\/cover\./.test(f.name) }))[0]?.[1]
@@ -465,7 +466,12 @@ export async function tidyBook(hash: string) {
   const old = await store.loadBookFile(cur)
   const read = readManifest(old)
   if (!read) throw new Error(tr('这本书不是从书库下载的'))
-  const vols = read.volumes.map((v, i) => ({ ...v, file: v.file ?? i }))
+  // 书里记的卷 id 可能还是换书源前的：按卷号换成书架记录上的（记录跟着现在的书源）
+  const recKeys = cur.source?.kind === read.source ? cur.source.volumes.map(v => volKey(v.title, cur.title)) : []
+  const vols = read.volumes.map((v, i) => {
+    const r = cur.source?.volumes[recKeys.indexOf(volKey(v.title, cur.title))]
+    return { ...v, id: r && r.id !== v.id ? r.id : v.id, file: v.file ?? i }
+  })
   const plan = tidyPlan(vols, cur.title)
   if (!plan.remove.length && !plan.rename.size) {
     store.showToast(tr('《{title}》的卷已经很整齐了', { title: cur.title }))
