@@ -11,10 +11,10 @@ import { useStore } from '../store'
 import { setKeepScreenOn } from '../native'
 import { tr } from '../i18n'
 import { BROWSER_SLOTS, cancelBrowser } from './browser'
-import { appendEpub, buildEpub, imageType, readManifest, type EpubImage, type EpubVolume, type SourceManifest } from './epub'
+import { appendEpub, buildEpub, editVolumes, imageType, readManifest, type EpubImage, type EpubVolume, type SourceManifest } from './epub'
 import type { BookSource, ChapterContent, SourceBook, SourceChapter, SourceVolume } from './types'
 import type { BookRecord, SourceRef } from '../types'
-import { volKey } from './update'
+import { styleVolTitle, tidyPlan, volKey, volStyle } from './update'
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 const aborted = () => new DOMException('cancelled', 'AbortError')
@@ -352,7 +352,8 @@ export async function downloadToShelf(
           id: book.id,
           volumes: manifest.volumes.map(v => {
             const r = remote[keys.indexOf(volKey(v.title, cur.title))]
-            return r ? { ...volEntry(r), file: v.file } : v
+            // 卷名保留书里原来的（只换成新书源的卷 id 和章节）
+            return r ? { ...volEntry(r), title: v.title, file: v.file } : v
           }),
         }
       }
@@ -363,7 +364,13 @@ export async function downloadToShelf(
       const better = bigCover && !oldOk ? bigCover : null
       const base = manifest
       const lastIdx = base.volumes.length - 1
-      const outVols = merge.toLast.length ? out.slice(1) : out
+      // 新卷的卷名按书里原有的样式（“第十五卷 短篇集”或“书名 15 短篇集”），不混用两个网站的叫法
+      const style = volStyle(
+        base.volumes.map(v => v.title),
+        cur.title,
+      )
+      const named = (title: string) => styleVolTitle(title, book.title, style, cur.title)
+      const outVols = (merge.toLast.length ? out.slice(1) : out).map(v => ({ ...v, title: named(v.title) }))
       // 补到中间的卷：插到书里那一卷前面
       const pos = volumes.map(v => merge.before?.[v.id])
       let merged = base
@@ -376,7 +383,7 @@ export async function downloadToShelf(
         },
         images,
         files => {
-          const entry = (k: number) => ({ ...volEntry(volumes[k]), file: files[k] })
+          const entry = (k: number) => ({ ...volEntry(volumes[k]), title: named(volumes[k].title), file: files[k] })
           const result: SourceManifest['volumes'] = []
           base.volumes.forEach((v, i) => {
             volumes.forEach((_, k) => pos[k] === i && result.push(entry(k)))
@@ -445,4 +452,54 @@ export function toSourceRef(m: SourceManifest): SourceRef {
     })),
     mergedAt: Date.now(),
   }
+}
+
+/**
+ * 整理书架上一本从书库下载的书：删掉重复的卷、卷名统一成一种样式。
+ * 改的是书籍文件本身（写回书籍文件夹、上传云端），进度、书签、笔记的位置跟着改写
+ */
+export async function tidyBook(hash: string) {
+  const store = useStore.getState()
+  const cur = store.library.find(b => b.hash === hash && !b.deletedAt)
+  if (!cur) return
+  const old = await store.loadBookFile(cur)
+  const read = readManifest(old)
+  if (!read) throw new Error(tr('这本书不是从书库下载的'))
+  const vols = read.volumes.map((v, i) => ({ ...v, file: v.file ?? i }))
+  const plan = tidyPlan(vols, cur.title)
+  if (!plan.remove.length && !plan.rename.size) {
+    store.showToast(tr('《{title}》的卷已经很整齐了', { title: cur.title }))
+    return
+  }
+  const manifest: SourceManifest = {
+    ...read,
+    volumes: vols.flatMap((v, i) => {
+      if (plan.remove.includes(i)) return []
+      const from = plan.takeFrom.get(i)
+      return [
+        {
+          ...v,
+          ...(from !== undefined ? { id: vols[from].id, chapters: vols[from].chapters } : {}),
+          title: plan.rename.get(i) ?? v.title,
+        },
+      ]
+    }),
+  }
+  const { bytes, remap } = editVolumes(
+    old,
+    {
+      remove: plan.remove.map(i => vols[i].file),
+      rename: Object.fromEntries([...plan.rename].map(([i, t]) => [vols[i].file, t])),
+    },
+    manifest,
+  )
+  if (remap.some((n, i) => n !== i)) store.remapBookPositions(hash, remap)
+  await store.updateBookFile(hash, bytes, cur.fileName || `${cur.title}.epub`)
+  await store.writeBookToFolder(hash, bytes)
+  store.setBookSource(hash, { ...toSourceRef(manifest), checkedAt: undefined })
+  const parts = [
+    plan.remove.length && tr('删掉了 {n} 个重复的卷', { n: plan.remove.length }),
+    plan.rename.size && tr('统一了 {n} 个卷名', { n: plan.rename.size }),
+  ].filter(Boolean)
+  store.showToast(tr('《{title}》已整理：{list}', { title: cur.title, list: parts.join('，') }))
 }

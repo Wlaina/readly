@@ -60,12 +60,53 @@ function toNum(s: string): number | null {
  * 没有卷号的（短篇、番外…）按去掉书名后的卷名
  */
 export function volKey(title: string, bookTitle: string): string {
+  return volParts(title, bookTitle).key
+}
+
+/**
+ * 拆开卷名：卷号 n（没有为 null）、卷号后面的副标题 rest（例如“短篇集”），以及比较用的 key。
+ * “第十五卷 短篇集”“魔女之旅 15 短篇集”“Vol.15 短篇集”都是第 15 卷、副标题“短篇集”
+ */
+export function volParts(title: string, bookTitle: string): { n: number | null; rest: string; key: string } {
   let t = norm(title)
   const bt = norm(bookTitle)
   if (bt && t.startsWith(bt)) t = t.slice(bt.length)
-  const m = t.match(/第(\d+|[零〇一二两三四五六七八九十百]+)[卷册部集]/) ?? t.match(/^(?:vol|卷)?(\d+|[一二三四五六七八九十]+)$/)
-  const n = m ? toNum(m[1]) : null
-  return n != null ? `#${n}` : t
+  const m =
+    t.match(/^(.*?)第(\d+|[零〇一二两三四五六七八九十百]+)[卷册部集](.*)$/) ?? t.match(/^()(?:vol|卷)?(\d+|[一二三四五六七八九十]+)(?!\d)(.*)$/)
+  const n = m ? toNum(m[2]) : null
+  if (n == null) return { n: null, rest: '', key: t }
+  // 副标题用原文（norm 去掉了空格标点），从原卷名里取卷号之后的部分
+  const raw = title.replace(/\s+/g, ' ').trim()
+  const after = raw.match(/(?:第\s*(?:\d+|[零〇一二两三四五六七八九十百]+)\s*[卷册部集]|(?:vol\.?|卷)?\s*\d+|[一二三四五六七八九十]+$)\s*(.*)$/i)
+  return { n, rest: m![3] ? (after?.[1] ?? '').trim() : '', key: `#${n}` }
+}
+
+/** 卷名统一成书里原有的样式：“第十五卷 短篇集”或“书名 15 短篇集” */
+const CN = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九']
+export function cnNum(n: number): string {
+  if (n < 10) return CN[n]
+  if (n < 20) return '十' + (n % 10 ? CN[n % 10] : '')
+  if (n < 100) return CN[Math.floor(n / 10)] + '十' + (n % 10 ? CN[n % 10] : '')
+  return String(n)
+}
+export type VolStyle = 'cn' | 'title'
+/** 书里卷名的样式：多数是“第N卷”还是“书名 N” */
+export function volStyle(titles: string[], bookTitle: string): VolStyle | null {
+  let cn = 0
+  let num = 0
+  for (const t of titles) {
+    if (volParts(t, bookTitle).n == null) continue
+    if (/第\s*(\d+|[零〇一二两三四五六七八九十百]+)\s*[卷册部集]/.test(t)) cn++
+    else num++
+  }
+  return cn || num ? (cn >= num ? 'cn' : 'title') : null
+}
+/** 按样式改写卷名（没有卷号的卷名不动） */
+export function styleVolTitle(title: string, srcBookTitle: string, style: VolStyle | null, bookTitle: string): string {
+  const p = volParts(title, srcBookTitle)
+  if (p.n == null || !style) return title
+  const head = style === 'cn' ? `第${cnNum(p.n)}卷` : `${bookTitle} ${p.n}`
+  return p.rest ? `${head} ${p.rest}` : head
 }
 
 /** 同一本书在另一个书源上：书名一样，作者（两边都有时）也对得上 */
@@ -136,7 +177,8 @@ export function crossRef(ref: SourceRef, shelfTitle: string, kind: string, id: s
     id,
     volumes: ref.volumes.map(v => {
       const r = remote[remoteKeys.indexOf(volKey(v.title, shelfTitle))]
-      return r ? { id: r.id, title: r.title, chapters: r.chapters.length } : v
+      // 卷名保留书里原来的
+      return r ? { id: r.id, title: v.title, chapters: r.chapters.length } : v
     }),
     checkedAt: undefined,
     newVolumes: 0,
@@ -190,4 +232,35 @@ export async function checkUpdates(onlyStale = false) {
   }
   if (found) useStore.getState().showToast(tr('书库：{n} 本书有更新', { n: found }))
   else if (!onlyStale) useStore.getState().showToast(tr('书库：都是最新的'))
+}
+
+/**
+ * 整理书里的卷：同一卷出现两次（例如换书源后又补了一遍）只留排在前面的那份，
+ * 卷 id 和章节取最后加的那份（它来自现在追更的书源）；卷名统一成书里多数卷的样式。
+ * 返回要删掉的卷的位置、留下的卷从哪一卷取 id，以及要改的卷名（位置 → 新卷名）
+ */
+export function tidyPlan(vols: { title: string }[], bookTitle: string) {
+  const firstAt = new Map<string, number>()
+  const remove: number[] = []
+  const takeFrom = new Map<number, number>()
+  vols.forEach((v, i) => {
+    const k = volKey(v.title, bookTitle)
+    const f = firstAt.get(k)
+    if (f === undefined) firstAt.set(k, i)
+    else {
+      remove.push(i)
+      takeFrom.set(f, i)
+    }
+  })
+  const style = volStyle(
+    vols.map(v => v.title),
+    bookTitle,
+  )
+  const rename = new Map<number, string>()
+  vols.forEach((v, i) => {
+    if (remove.includes(i)) return
+    const t = styleVolTitle(v.title, bookTitle, style, bookTitle)
+    if (t !== v.title) rename.set(i, t)
+  })
+  return { remove, takeFrom, rename }
 }

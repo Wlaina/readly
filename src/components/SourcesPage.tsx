@@ -4,14 +4,14 @@ import { IconCheck, IconDownload, IconSearch, IconX } from './icons'
 import { tr } from '../lib/i18n'
 import { useStore } from '../lib/store'
 import { cancelBrowser, onBrowserHidden, showBrowser } from '../lib/sources/browser'
-import { cancelDownload, downloadToShelf, fetchImage, pauseDownload, useDownloads } from '../lib/sources/download'
+import { cancelDownload, downloadToShelf, fetchImage, pauseDownload, tidyBook, useDownloads } from '../lib/sources/download'
 import { wenku8 } from '../lib/sources/wenku8'
 import { linovelib } from '../lib/sources/linovelib'
 import type { BookSource, SearchHit, SearchOutcome, SourceBook, SourceVolume } from '../lib/sources/types'
 import type { BookRecord } from '../lib/types'
 import { pushOverlay } from '../lib/overlay'
 import { loadCover, peekCover } from '../lib/covers'
-import { checkUpdates, crossRef, findShelfBook, planUpdate, sameBook, sourceBooks, sourceOf, useUpdateCheck } from '../lib/sources/update'
+import { checkUpdates, crossRef, findShelfBook, planUpdate, sameBook, sourceBooks, sourceOf, tidyPlan, useUpdateCheck } from '../lib/sources/update'
 import OnlineShelf from './OnlineShelf'
 import { openOnlineInReader } from '../lib/sources/onlinebook'
 import { toggleOnlineShelf, useOnShelf } from '../lib/sources/online'
@@ -477,6 +477,20 @@ function BookSheet({ source, id, onClose }: { source: BookSource; id: string; on
   const fromName = shelf?.source ? (sourceOf(shelf.source.kind)?.name ?? shelf.source.kind) : ''
   const onlineShelved = useOnShelf(source.id, id)
   const plan = shelf?.source && vols ? planUpdate(shelf.source, vols, cross) : null
+  // 书里有重复的卷、卷名样式不统一：可以一键整理
+  const tidy = shelf?.source ? tidyPlan(shelf.source.volumes, shelf.title) : null
+  const [tidying, setTidying] = useState(false)
+  const runTidy = async () => {
+    if (!shelf) return
+    setTidying(true)
+    try {
+      await tidyBook(shelf.hash)
+    } catch (e) {
+      showToast(tr('整理失败：{e}', { e: errText(e) }))
+    } finally {
+      setTidying(false)
+    }
+  }
 
   useEffect(() => {
     let alive = true
@@ -591,6 +605,24 @@ function BookSheet({ source, id, onClose }: { source: BookSource; id: string; on
                     })}
                   </b>
                 )}
+              </div>
+            )}
+            {shelf && tidy && (tidy.remove.length > 0 || tidy.rename.size > 0) && !dl && (
+              <div className="src-merge-note">
+                {[
+                  tidy.remove.length > 0 &&
+                    tr('书里有 {n} 个重复的卷（{list}）', {
+                      n: tidy.remove.length,
+                      list: tidy.remove.map(i => shelf.source!.volumes[i].title).join('、'),
+                    }),
+                  tidy.rename.size > 0 && tr('{n} 个卷名和其他卷的叫法不一样', { n: tidy.rename.size }),
+                ]
+                  .filter(Boolean)
+                  .join('；')}
+                。{tr('整理会删掉重复的那份、把卷名统一成同一种叫法，阅读进度、书签和笔记的位置会跟着改好。')}
+                <button className="btn ghost src-follow" disabled={tidying} onClick={runTidy}>
+                  {tidying ? tr('整理中…') : tr('整理这本书')}
+                </button>
               </div>
             )}
             <div className="src-vols">

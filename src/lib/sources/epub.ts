@@ -312,3 +312,56 @@ export function appendEpub(
   const remap = oldOrder.map(id => newOrder.indexOf(id))
   return { bytes: zip({ ...files, ...w.files }), remap }
 }
+
+/**
+ * 整理书里的卷：remove 删掉这些卷（文件序号），rename 把卷改名（文件序号 → 新卷名，目录和卷首页一起改）。
+ * 返回新的 EPUB，以及阅读顺序的变化 remap[旧位置] = 新位置（删掉的项算到它后面第一个留下的项上）
+ */
+export function editVolumes(
+  bytes: Uint8Array,
+  ops: { remove: number[]; rename: Record<number, string> },
+  manifest: SourceManifest,
+): { bytes: Uint8Array; remap: number[] } {
+  const files = unzipSync(bytes)
+  delete files.mimetype
+  const OPF = 'http://www.idpf.org/2007/opf'
+  const opfDoc = new DOMParser().parseFromString(strFromU8(files['OEBPS/content.opf']), 'application/xml')
+  const spine = opfDoc.getElementsByTagNameNS(OPF, 'spine')[0]
+  const idrefs = () => [...spine.getElementsByTagNameNS(OPF, 'itemref')].map(i => i.getAttribute('idref') ?? '')
+  const oldOrder = idrefs()
+  const gone = (id: string) => ops.remove.some(vi => id === `v${vi}` || id.startsWith(`v${vi}c`))
+
+  for (const ref of [...spine.getElementsByTagNameNS(OPF, 'itemref')]) if (gone(ref.getAttribute('idref') ?? '')) ref.remove()
+  for (const item of [...opfDoc.getElementsByTagNameNS(OPF, 'item')]) {
+    if (!gone(item.getAttribute('id') ?? '')) continue
+    delete files[`OEBPS/${item.getAttribute('href')}`]
+    item.remove()
+  }
+
+  const navDoc = new DOMParser().parseFromString(strFromU8(files['OEBPS/nav.xhtml']), 'application/xhtml+xml')
+  const topOl = navDoc.querySelector('nav > ol')
+  const volLi = (vi: number) => [...(topOl?.children ?? [])].find(e => e.querySelector('a')?.getAttribute('href') === volFile(vi))
+  for (const vi of ops.remove) volLi(vi)?.remove()
+  for (const [k, title] of Object.entries(ops.rename)) {
+    const vi = Number(k)
+    const a = volLi(vi)?.querySelector('a')
+    if (a) a.textContent = title
+    if (files[`OEBPS/${volFile(vi)}`]) files[`OEBPS/${volFile(vi)}`] = strToU8(page(title, `<h1 class="volume">${esc(title)}</h1>`))
+  }
+  files['OEBPS/nav.xhtml'] = strToU8(new XMLSerializer().serializeToString(navDoc))
+
+  const mod = [...opfDoc.getElementsByTagNameNS(OPF, 'meta')].find(m => m.getAttribute('property') === 'dcterms:modified')
+  if (mod) mod.textContent = new Date().toISOString().replace(/\.\d+Z$/, 'Z')
+  files['OEBPS/content.opf'] = strToU8(new XMLSerializer().serializeToString(opfDoc))
+  files['OEBPS/readly-source.json'] = strToU8(JSON.stringify(manifest))
+
+  const newOrder = idrefs()
+  const remap = oldOrder.map((_, i) => {
+    for (let j = i; j < oldOrder.length; j++) {
+      const k = newOrder.indexOf(oldOrder[j])
+      if (k >= 0) return k
+    }
+    return Math.max(0, newOrder.length - 1)
+  })
+  return { bytes: zip(files), remap }
+}
