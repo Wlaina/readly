@@ -35,7 +35,7 @@ export async function fetchImage(url: string, referer: string): Promise<EpubImag
 
 /**
  * 把一张图变成封面：竖向的直接用；横向的跨页书封裁出正封面。日式轻小说从右往左翻，
- * 书封摊开是“封面 + 书脊 + 封底”，正封面在左侧（右侧是印着简介的封底）；
+ * 书封摊开是“（折页）+ 封面 + 书脊 + 封底”，正封面在左侧（右侧是印着简介的封底）；
  * 其他（太小、比例奇怪）返回 null
  */
 export async function asCover(img: EpubImage): Promise<EpubImage | null> {
@@ -47,15 +47,49 @@ export async function asCover(img: EpubImage): Promise<EpubImage | null> {
       bmp.close()
       return null
     }
-    const cw = Math.round(h / 1.42)
+    const [left, right] = frontCoverSpan(bmp)
+    const cw = right - left
     const canvas = new OffscreenCanvas(cw, h)
-    canvas.getContext('2d')!.drawImage(bmp, 0, 0, cw, h, 0, 0, cw, h)
+    canvas.getContext('2d')!.drawImage(bmp, left, 0, cw, h, 0, 0, cw, h)
     bmp.close()
     const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.92 })
     return { bytes: new Uint8Array(await blob.arrayBuffer()), type: 'image/jpeg' }
   } catch {
     return null
   }
+}
+
+/**
+ * 在跨页书封里找正封面的左右边界。折线（折页、书脊的边）是从上到下贯穿整张图的颜色突变，
+ * 找出这些竖线，取宽高比最像封面（高约为宽的 1.42 倍）的一段，差不多时取靠左的。
+ * 找不到就退回从最左边裁一个封面宽度
+ */
+function frontCoverSpan(bmp: ImageBitmap): [number, number] {
+  const { width: w, height: h } = bmp
+  const fallback: [number, number] = [0, Math.min(w, Math.round(h / 1.42))]
+  const ctx = new OffscreenCanvas(w, h).getContext('2d', { willReadFrequently: true })
+  if (!ctx) return fallback
+  ctx.drawImage(bmp, 0, 0)
+  const px = ctx.getImageData(0, 0, w, h).data
+  const lum = new Uint8Array(w * h)
+  for (let i = 0; i < w * h; i++) lum[i] = (px[i * 4] * 299 + px[i * 4 + 1] * 587 + px[i * 4 + 2] * 114) / 1000
+  // 每一列：和右边一列颜色差得明显的行占多少
+  const lines = [0]
+  for (let x = 0; x < w - 1; x++) {
+    let n = 0
+    for (let y = 0; y < h; y++) if (Math.abs(lum[y * w + x] - lum[y * w + x + 1]) > 18) n++
+    if (n / h >= 0.4 && x + 1 - lines[lines.length - 1] > 10) lines.push(x + 1)
+  }
+  lines.push(w)
+  let best: { cost: number; span: [number, number] } | null = null
+  for (let i = 0; i < lines.length; i++)
+    for (let j = i + 1; j < lines.length; j++) {
+      const ratio = h / (lines[j] - lines[i])
+      if (ratio < 1.3 || ratio > 1.65) continue
+      const cost = Math.abs(ratio - 1.42)
+      if (!best || cost < best.cost - 0.03) best = { cost, span: [lines[i], lines[j]] }
+    }
+  return best?.span ?? fallback
 }
 
 /** 适合当封面：竖向（高是宽的 1.2 ~ 1.8 倍），而且不是太小的缩略图 */
