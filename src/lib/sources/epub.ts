@@ -30,7 +30,11 @@ export interface EpubImage {
 export interface SourceManifest {
   source: string
   id: string
-  volumes: { id: string; title: string; chapters: string[] }[]
+  /**
+   * 书里的卷（按阅读顺序）。file：这一卷在书里的文件序号（v001.xhtml 是 0）；
+   * 旧的书没有这一项，那时只会往末尾追加，序号就是卷的位置
+   */
+  volumes: { id: string; title: string; chapters: string[]; file?: number }[]
 }
 
 const esc = (s: string) =>
@@ -188,28 +192,42 @@ export function readManifest(bytes: Uint8Array): SourceManifest | null {
   }
 }
 
+/** 追加的一卷：before 是书里某一卷的文件序号，插到它前面（补上当初没下载的中间卷）；不填就接在末尾 */
+export interface AddVolume extends EpubVolume {
+  before?: number
+}
+
 /**
- * 追更：往已有的书末尾追加。
- * - toLast：最后一卷新出的章节（接在最后一卷后面）
- * - volumes：新的卷
- * 返回新的 EPUB；书里原有的内容、文件名、顺序都不变。
+ * 追更：往已有的书里加内容。
+ * - toLast：最后一卷新出的章节（接在最后一卷后面）；lastFile 是最后一卷的文件序号
+ * - volumes：新的卷，接在末尾或插到中间
+ * - manifest：拿到新卷的文件序号后，给出要写进书里的来源记录
+ * 返回新的 EPUB，以及阅读顺序的变化 remap[旧位置] = 新位置（插到中间时，后面的位置都会后移，
+ * 进度、书签、笔记要按它改写）。书里原有的内容、文件名都不变。
  */
 export function appendEpub(
   bytes: Uint8Array,
-  add: { toLast: EpubChapter[]; volumes: EpubVolume[] },
+  add: { toLast: EpubChapter[]; volumes: AddVolume[]; lastFile?: number },
   images: Map<string, EpubImage>,
-  manifest: SourceManifest,
+  manifest: (files: number[]) => SourceManifest,
   /** 更清楚的封面：换掉书里原来的（只换封面图片本身，正文不动） */
   cover?: EpubImage | null,
-): Uint8Array {
+): { bytes: Uint8Array; remap: number[] } {
   const files = unzipSync(bytes)
   delete files.mimetype
   const names = Object.keys(files)
-  const lastVol = Math.max(-1, ...names.map(n => Number(n.match(/^OEBPS\/v(\d{3})\.xhtml$/)?.[1] ?? 0) - 1))
+  const maxVol = Math.max(-1, ...names.map(n => Number(n.match(/^OEBPS\/v(\d{3})\.xhtml$/)?.[1] ?? 0) - 1))
+  const lastVol = add.lastFile ?? maxVol
   const imgSeq = Math.max(0, ...names.map(n => Number(n.match(/^OEBPS\/images\/img(\d+)\./)?.[1] ?? 0)))
   const w = new Writer(images, imgSeq)
 
-  // 目录：在原有目录上追加
+  const opfDoc = new DOMParser().parseFromString(strFromU8(files['OEBPS/content.opf']), 'application/xml')
+  const OPF = 'http://www.idpf.org/2007/opf'
+  const spine = opfDoc.getElementsByTagNameNS(OPF, 'spine')[0]
+  const idrefs = () => [...spine.getElementsByTagNameNS(OPF, 'itemref')].map(i => i.getAttribute('idref') ?? '')
+  const oldOrder = idrefs()
+
+  // 目录：在原有目录上加
   const navDoc = new DOMParser().parseFromString(strFromU8(files['OEBPS/nav.xhtml']), 'application/xhtml+xml')
   const XHTML = 'http://www.w3.org/1999/xhtml'
   const topOl = navDoc.querySelector('nav > ol')
@@ -221,44 +239,59 @@ export function appendEpub(
     el.appendChild(a)
     return el
   }
+  /** 目录里某一卷的条目 */
+  const volLi = (vi: number) => [...(topOl?.children ?? [])].find(e => e.querySelector('a')?.getAttribute('href') === volFile(vi))
 
+  // 每段新内容在阅读顺序里的条目，以及要插到哪一卷前面（不填 = 末尾）
+  const chunks: { spine: string[]; before?: number }[] = []
   if (add.toLast.length && lastVol >= 0) {
     const existing = names.filter(n => new RegExp(`^OEBPS/v${pad(lastVol + 1, 3)}c\\d{4}\\.xhtml$`).test(n)).length
-    const volLi = topOl?.lastElementChild
-    let sub: Element | null | undefined = volLi?.querySelector('ol')
-    if (volLi && !sub) {
+    const last = volLi(lastVol) ?? topOl?.lastElementChild
+    let sub: Element | null | undefined = last?.querySelector('ol')
+    if (last && !sub) {
       sub = navDoc.createElementNS(XHTML, 'ol')
-      volLi.appendChild(sub)
+      last.appendChild(sub)
     }
+    const s0 = w.spine.length
     add.toLast.forEach((ch, i) => sub?.appendChild(li(w.chapter(lastVol, existing + i, ch), ch.title)))
+    chunks.push({ spine: w.spine.slice(s0) })
   }
+  const added: number[] = []
   add.volumes.forEach((vol, k) => {
-    const vi = lastVol + 1 + k
+    const vi = maxVol + 1 + k
+    added.push(vi)
+    const s0 = w.spine.length
     const item = li(w.volume(vi, vol.title), vol.title)
     if (vol.chapters.length) {
       const sub = navDoc.createElementNS(XHTML, 'ol')
       vol.chapters.forEach((ch, ci) => sub.appendChild(li(w.chapter(vi, ci, ch), ch.title)))
       item.appendChild(sub)
     }
-    topOl?.appendChild(item)
+    const target = vol.before !== undefined ? volLi(vol.before) : undefined
+    if (target) topOl?.insertBefore(item, target)
+    else topOl?.appendChild(item)
+    chunks.push({ spine: w.spine.slice(s0), before: target ? vol.before : undefined })
   })
   files['OEBPS/nav.xhtml'] = strToU8(new XMLSerializer().serializeToString(navDoc))
 
-  // 包文件：追加清单与阅读顺序，更新修改时间
-  const opfDoc = new DOMParser().parseFromString(strFromU8(files['OEBPS/content.opf']), 'application/xml')
-  const OPF = 'http://www.idpf.org/2007/opf'
+  // 包文件：清单、阅读顺序（插到中间的放到那一卷前面），更新修改时间
   const frag = (xml: string) =>
     [...new DOMParser().parseFromString(`<x xmlns="${OPF}">${xml}</x>`, 'application/xml').documentElement.children].map(n => opfDoc.importNode(n, true))
   const man = opfDoc.getElementsByTagNameNS(OPF, 'manifest')[0]
-  const spine = opfDoc.getElementsByTagNameNS(OPF, 'spine')[0]
   for (const n of frag(w.manifest.join(''))) man.appendChild(n)
-  for (const n of frag(w.spine.join(''))) spine.appendChild(n)
+  for (const c of chunks) {
+    const target =
+      c.before !== undefined ? [...spine.getElementsByTagNameNS(OPF, 'itemref')].find(i => i.getAttribute('idref') === `v${c.before}`) : undefined
+    for (const n of frag(c.spine.join(''))) {
+      if (target) spine.insertBefore(n, target)
+      else spine.appendChild(n)
+    }
+  }
   if (!opfDoc.querySelector('[id="readly-source"]'))
     for (const n of frag('<item id="readly-source" href="readly-source.json" media-type="application/json"/>')) man.appendChild(n)
   const mod = [...opfDoc.getElementsByTagNameNS(OPF, 'meta')].find(m => m.getAttribute('property') === 'dcterms:modified')
   if (mod) mod.textContent = new Date().toISOString().replace(/\.\d+Z$/, 'Z')
-  files['OEBPS/content.opf'] = strToU8(new XMLSerializer().serializeToString(opfDoc))
-  files['OEBPS/readly-source.json'] = strToU8(JSON.stringify(manifest))
+  files['OEBPS/readly-source.json'] = strToU8(JSON.stringify(manifest(added)))
 
   // 换封面：沿用原来的清单条目，只改文件内容（扩展名不同就连同 href、类型一起改）
   const t = cover && imageType(cover.bytes)
@@ -271,9 +304,11 @@ export function appendEpub(
       files[`OEBPS/${newHref}`] = cover.bytes
       item.setAttribute('href', newHref)
       item.setAttribute('media-type', t.mime)
-      files['OEBPS/content.opf'] = strToU8(new XMLSerializer().serializeToString(opfDoc))
     }
   }
+  files['OEBPS/content.opf'] = strToU8(new XMLSerializer().serializeToString(opfDoc))
 
-  return zip({ ...files, ...w.files })
+  const newOrder = idrefs()
+  const remap = oldOrder.map(id => newOrder.indexOf(id))
+  return { bytes: zip({ ...files, ...w.files }), remap }
 }

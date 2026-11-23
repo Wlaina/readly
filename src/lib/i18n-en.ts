@@ -820,4 +820,5 @@ export const EN: Record<string, string | ((v: V) => string)> = {
   '换源失败：{e}': 'Couldn’t switch source: {e}',
   '切换中…': 'Switching…',
   '换到{name}': 'Switch to {name}',
+  '补到中间 · {n} 章': 'Fill in the middle · {n} chapters',
 }

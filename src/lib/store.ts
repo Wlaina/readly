@@ -138,6 +138,11 @@ interface State {
   setOnlineShelfRecord: (base: BookRecord, shelved: boolean) => void
   /** 书库：记下这本书来自哪个书源、下载了哪些卷（随书架同步） */
   setBookSource: (hash: string, source: BookRecord['source']) => void
+  /**
+   * 书里插入了新内容（追更补到中间的卷）：阅读顺序里第 i 项挪到了 remap[i]，
+   * 按它改写进度、书签、笔记的位置（随同步到其他设备）
+   */
+  remapBookPositions: (hash: string, remap: number[]) => void
   /** 电脑端：书来自书籍文件夹时，把新的文件内容写回文件夹里的原文件（追更后用） */
   writeBookToFolder: (hash: string, bytes: Uint8Array) => Promise<void>
   updateSettings: (fn: (s: Settings) => Settings) => void
@@ -983,6 +988,27 @@ export const useStore = create<State>((set, get) => {
         patchBook(cur.hash, b => ({ ...b, online, localOnly: undefined, hasFile: false, deletedAt: undefined, metaUpdatedAt: now, updatedAt: now }))
       else putBooks([{ ...base, online, metaUpdatedAt: now, updatedAt: now }])
       get().syncQuick('push')
+    },
+
+    remapBookPositions(hash, remap) {
+      const now = Date.now()
+      // 位置写作 epubcfi(/6/N!…)，N = 2 × (阅读顺序里的序号 + 1)
+      const fix = (cfi: string) =>
+        cfi.replace(/^epubcfi\(\/6\/(\d+)/, (m, n: string) => {
+          const j = remap[Number(n) / 2 - 1]
+          return j === undefined || j < 0 ? m : `epubcfi(/6/${(j + 1) * 2}`
+        })
+      const touch = <T extends { cfi: string; updatedAt: number }>(x: T): T => {
+        const cfi = fix(x.cfi)
+        return cfi === x.cfi ? x : { ...x, cfi, updatedAt: now }
+      }
+      patchBook(hash, b => ({
+        ...b,
+        progress: b.progress && touch(b.progress),
+        bookmarks: b.bookmarks.map(touch),
+        annotations: b.annotations?.map(touch),
+        updatedAt: now,
+      }))
     },
 
     setBookSource(hash, source) {

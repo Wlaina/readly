@@ -492,7 +492,7 @@ function BookSheet({ source, id, onClose }: { source: BookSource; id: string; on
         const m = findShelfBook(useStore.getState().library, source.id, id, b)
         const have = m?.rec
         const p = have?.source ? planUpdate(have.source, v, m?.cross ? { shelfTitle: have.title, remoteTitle: b.title } : undefined) : null
-        setPick(new Set(v.map((_, i) => i).filter(i => !p || p.status[i] === 'new')))
+        setPick(new Set(v.map((_, i) => i).filter(i => !p || p.status[i] !== 'have')))
         // 顺手记下检查结果（书库页的“有更新”标记跟着刷新；换书源看到的不算）
         if (have?.source && p && !m?.cross)
           useStore.getState().setBookSource(have.hash, {
@@ -510,7 +510,7 @@ function BookSheet({ source, id, onClose }: { source: BookSource; id: string; on
     }
   }, [source, id])
 
-  const selectable = (i: number) => !plan || plan.status[i] === 'new'
+  const selectable = (i: number) => !plan || plan.status[i] !== 'have'
   const chosen = vols?.filter((_, i) => pick.has(i) && selectable(i)) ?? []
   const toLast = plan?.toLast ?? []
   const chapters = chosen.reduce((n, v) => n + v.chapters.length, 0) + toLast.length
@@ -520,7 +520,15 @@ function BookSheet({ source, id, onClose }: { source: BookSource; id: string; on
   const start = () => {
     if (!book || !chapters) return
     showToast(tr('开始下载，进度显示在书库页面上方'))
-    downloadToShelf(source, book, chosen, shelf ? { hash: shelf.hash, toLast, remote: cross ? (vols ?? undefined) : undefined } : undefined).catch(
+    // 中间缺的卷：插到它后面第一卷已有的卷前面
+    const before: Record<string, number> = {}
+    if (plan && vols)
+      vols.forEach((v, i) => {
+        if (!pick.has(i) || plan.status[i] !== 'gap') return
+        const j = plan.status.findIndex((st, k) => k > i && st === 'have')
+        if (j >= 0) before[v.id] = plan.idx[j]
+      })
+    downloadToShelf(source, book, chosen, shelf ? { hash: shelf.hash, toLast, remote: cross ? (vols ?? undefined) : undefined, before } : undefined).catch(
       e => e?.name !== 'AbortError' && showToast(tr('下载失败：{e}', { e: errText(e) })),
     )
   }
@@ -592,7 +600,7 @@ function BookSheet({ source, id, onClose }: { source: BookSource; id: string; on
                 return (
                   <button
                     key={v.id + i}
-                    className={`cat-row ${on ? 'on' : 'off'} ${st && st !== 'new' ? 'locked' : ''}`}
+                    className={`cat-row ${on ? 'on' : 'off'} ${st === 'have' ? 'locked' : ''}`}
                     role="checkbox"
                     aria-checked={on}
                     aria-disabled={!selectable(i)}
@@ -601,7 +609,7 @@ function BookSheet({ source, id, onClose }: { source: BookSource; id: string; on
                     <span className="cat-check">{on && <IconCheck />}</span>
                     <span className="cat-name">{v.title}</span>
                     <span className="muted">
-                      {st === 'have' ? tr('已在书架') : st === 'gap' ? tr('没下载，无法补到中间') : tr('{n} 章', { n: v.chapters.length })}
+                      {st === 'have' ? tr('已在书架') : st === 'gap' ? tr('补到中间 · {n} 章', { n: v.chapters.length }) : tr('{n} 章', { n: v.chapters.length })}
                     </span>
                   </button>
                 )

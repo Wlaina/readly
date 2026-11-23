@@ -205,7 +205,13 @@ export async function downloadToShelf(
   src: BookSource,
   book: SourceBook,
   volumes: SourceVolume[],
-  merge?: { hash: string; toLast: SourceChapter[]; remote?: SourceVolume[] },
+  merge?: {
+    hash: string
+    toLast: SourceChapter[]
+    remote?: SourceVolume[]
+    /** 补到中间的卷：网站上的卷 id → 插到书里第几卷（位置）前面 */
+    before?: Record<string, number>
+  },
 ) {
   const key = `${src.id}:${book.id}`
   if (activeDownloads.has(key)) throw new Error(tr('这本书正在下载'))
@@ -329,12 +335,14 @@ export async function downloadToShelf(
     })
     let rec: BookRecord | undefined
     if (merge) {
-      // 追更：读出书架上那本书，在末尾追加
+      // 追更：读出书架上那本书，追加到末尾（或补到中间）
       const cur = store.library.find(b => b.hash === merge.hash && !b.deletedAt)
       if (!cur) throw new Error(tr('书架上找不到这本书了'))
       const old = await store.loadBookFile(cur)
-      let manifest = readManifest(old)
-      if (!manifest) throw new Error(tr('这本书不是从书库下载的，没法追更'))
+      const read = readManifest(old)
+      if (!read) throw new Error(tr('这本书不是从书库下载的，没法追更'))
+      // 旧的书没记每卷的文件序号：那时只会往末尾追加，序号就是卷的位置
+      let manifest: SourceManifest = { ...read, volumes: read.volumes.map((v, i) => ({ ...v, file: v.file ?? i })) }
       // 换书源：已有的卷按卷号换成这个书源上的卷，以后按这个书源追更
       if (manifest.source !== src.id || manifest.id !== book.id) {
         const remote = merge.remote ?? []
@@ -344,38 +352,44 @@ export async function downloadToShelf(
           id: book.id,
           volumes: manifest.volumes.map(v => {
             const r = remote[keys.indexOf(volKey(v.title, cur.title))]
-            return r ? volEntry(r) : v
+            return r ? { ...volEntry(r), file: v.file } : v
           }),
         }
-      }
-      const last = manifest.volumes[manifest.volumes.length - 1]
-      const merged: SourceManifest = {
-        ...manifest,
-        volumes: [
-          ...manifest.volumes.slice(0, -1),
-          ...(last
-            ? [
-                {
-                  ...last,
-                  chapters: [...last.chapters, ...merge.toLast.map(c => c.id)],
-                },
-              ]
-            : []),
-          ...volumes.map(volEntry),
-        ],
       }
       // 原来的封面是小缩略图（例如以前下载的书）而现在有更清楚的：顺手换掉
       const oldCover = Object.entries(unzipSync(old, { filter: f => /^OEBPS\/images\/cover\./.test(f.name) }))[0]?.[1]
       // 原来的封面太小，或者不是竖向的（以前可能选到了横向跨页图）：换成新的
       const oldOk = oldCover && oldCover.length * 2 > (bigCover?.bytes.length ?? 0) && (await isCoverShape({ bytes: oldCover, type: '' }))
       const better = bigCover && !oldOk ? bigCover : null
-      const bytes = appendEpub(
+      const base = manifest
+      const lastIdx = base.volumes.length - 1
+      const outVols = merge.toLast.length ? out.slice(1) : out
+      // 补到中间的卷：插到书里那一卷前面
+      const pos = volumes.map(v => merge.before?.[v.id])
+      let merged = base
+      const { bytes, remap } = appendEpub(
         old,
-        { toLast: merge.toLast.length ? out[0].chapters : [], volumes: merge.toLast.length ? out.slice(1) : out },
+        {
+          toLast: merge.toLast.length ? out[0].chapters : [],
+          lastFile: base.volumes[lastIdx]?.file,
+          volumes: outVols.map((v, k) => ({ ...v, before: pos[k] !== undefined ? base.volumes[pos[k]!]?.file : undefined })),
+        },
         images,
-        merged,
+        files => {
+          const entry = (k: number) => ({ ...volEntry(volumes[k]), file: files[k] })
+          const result: SourceManifest['volumes'] = []
+          base.volumes.forEach((v, i) => {
+            volumes.forEach((_, k) => pos[k] === i && result.push(entry(k)))
+            result.push(i === lastIdx ? { ...v, chapters: [...v.chapters, ...merge.toLast.map(c => c.id)] } : v)
+          })
+          volumes.forEach((_, k) => pos[k] === undefined && result.push(entry(k)))
+          merged = { ...base, volumes: result }
+          return merged
+        },
         better,
       )
+      // 补到了中间：后面各章在书里的位置后移了，进度、书签、笔记跟着改
+      if (remap.some((n, i) => n !== i)) store.remapBookPositions(cur.hash, remap)
       await store.updateBookFile(cur.hash, bytes, name)
       await store.writeBookToFolder(cur.hash, bytes)
       store.setBookSource(cur.hash, toSourceRef(merged))

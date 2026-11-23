@@ -3,7 +3,7 @@
  * 只能往书的末尾追加（见 epub.ts 的 appendEpub），所以：
  * - 最后一卷新出的章节 → 接在最后一卷后面
  * - 排在已下载的最后一卷**之后**的新卷 → 追加
- * - 排在中间、当初没下载的卷 → 没法插到中间，标记出来
+ * - 排在中间、当初没下载的卷 → 可以补进去（插到后面那一卷前面，进度、书签、笔记的位置会跟着改写）
  *
  * 同一本书在两个书源上都有：按书名（和作者）认出书架上的书，卷按卷号对应（哔哩是“书名 1”，文库是“第一卷”），
  * 可以从另一个书源追加新卷；追加后（或手动选择后）以后的检查更新改用这个书源。
@@ -20,8 +20,10 @@ const SOURCES: Record<string, BookSource> = { linovelib, wenku8 }
 export const sourceOf = (kind: string) => SOURCES[kind]
 
 export interface UpdatePlan {
-  /** 网站上每一卷的状态：已下载 / 可追加 / 在中间缺失 */
+  /** 网站上每一卷的状态：已下载 / 可追加 / 在中间缺失（可以补进去） */
   status: ('have' | 'new' | 'gap')[]
+  /** 网站上每一卷对应书里第几卷（没有为 -1） */
+  idx: number[]
   /** 最后一卷新出的章节 */
   toLast: SourceChapter[]
   /** 可以追加的新卷 */
@@ -96,6 +98,7 @@ export function planUpdate(ref: SourceRef, remote: SourceVolume[], cross?: { she
   }
   return {
     status,
+    idx,
     toLast,
     newVolumes: remote.filter((_, i) => status[i] === 'new'),
   }
