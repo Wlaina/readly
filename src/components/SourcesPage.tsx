@@ -334,7 +334,7 @@ export default function SourcesPage() {
               <div className="src-card glass">
                 <b>{tr('{name}的搜索需要登录', { name: tr(source.name) })}</b>
                 <div className="hint">
-                  {tr('会打开网站自己的登录页，账号密码只在网页里输入，Readly 不会保存。登录后关掉窗口（手机上按返回键），会自动重新搜索。')}
+                  {tr('会打开网站自己的登录页，账号密码只在网页里输入，Readly 不会保存。登录后关掉窗口（手机上点顶部的「关闭」），会自动重新搜索。')}
                 </div>
                 <div className="btn-row" style={{ marginTop: 12 }}>
                   <button className="btn primary" onClick={() => showBrowser(source.loginUrl, true)}>

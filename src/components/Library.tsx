@@ -10,8 +10,9 @@ import { SHELF_SORTS, type ShelfSort } from '../lib/settings'
 import type { BookRecord } from '../lib/types'
 import { BookCover } from './BookCover'
 import ShelfCarousel from './ShelfCarousel'
-import { IconCheck, IconChevronR, IconCloud, IconDownload, IconEdit, IconFolder, IconPlus, IconSearch, IconSort, IconSync, IconTag, IconTrash, IconX } from './icons'
+import { IconCheck, IconChevronR, IconCloud, IconDownload, IconEdit, IconFolder, IconImage, IconPlus, IconSearch, IconSort, IconSync, IconTag, IconTrash, IconX } from './icons'
 import BookInfoDialog from './BookInfoDialog'
+import CoverDialog from './CoverDialog'
 import { AssignSheet, ManageSheet } from './CategorySheets'
 import Presence from './Presence'
 import Sheet from './Sheet'
@@ -87,6 +88,7 @@ export default function Library() {
   const [selecting, setSelecting] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [editRec, setEditRec] = useState<BookRecord | null>(null)
+  const [coverRec, setCoverRec] = useState<BookRecord | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   const pageRef = useRef<HTMLDivElement>(null)
@@ -340,6 +342,12 @@ export default function Library() {
           <IconEdit />
           {tr('编辑信息')}
         </button>
+        {rec.format === 'epub' && rec.hasFile && (
+          <button onClick={() => run(() => setCoverRec(rec))}>
+            <IconImage />
+            {tr('更换封面')}
+          </button>
+        )}
         {catsOn && (
           <button onClick={() => run(() => openAssign([rec.hash]))}>
             <IconTag />
@@ -720,6 +728,12 @@ export default function Library() {
               </>
             )}
           </div>
+        )}
+      </Presence>
+
+      <Presence show={!!coverRec}>
+        {coverRec && (
+          <CoverDialog rec={useStore.getState().library.find(b => b.hash === coverRec.hash) ?? coverRec} onClose={() => setCoverRec(null)} />
         )}
       </Presence>
 

@@ -7,7 +7,7 @@ import { DEFAULT_SYNC, SyncEngine, type SyncConfig, type SyncMemo } from './sync
 import { paths, readBytes, readJSON, removeFile, writeBytes, writeJSON } from './storage'
 import { openBook, parseImport } from './book'
 import { endTask, runTask, startTask, updateTask, useTasks } from './tasks'
-import { setEpubMetadata } from './epubedit'
+import { restoreEpubCover, setEpubCover, setEpubMetadata } from './epubedit'
 import { invalidateCover, loadCover } from './covers'
 import { backgroundPut, createFolderFile, deleteFolderFile, isWindowsApp, writeFolderFile } from './native'
 import { registerCustomFont, unregisterCustomFont } from './fonts'
@@ -125,10 +125,17 @@ interface State {
   clearStats: (hashes: string[]) => void
   /** 编辑书籍信息：更新书架、写入 EPUB 文件、写回书籍文件夹、上传云端 */
   editBook: (hash: string, meta: { title: string; author: string }) => Promise<void>
+  /**
+   * 更换 EPUB 的封面（img 为 null 时恢复原封面）：改书籍文件本身（原封面备份在文件里），
+   * 写回书籍文件夹、上传云端，其他设备同步后也跟着换。成功返回 true
+   */
+  setBookCover: (hash: string, img: { bytes: Uint8Array; type: string } | null) => Promise<boolean>
   /** 书籍文件被外部修改：用新文件更新这本书（保留进度、书签、统计） */
   updateBookFile: (hash: string, bytes: Uint8Array, fileName: string, folderRef?: BookRecord['folderRef']) => Promise<void>
   /** 在线阅读：建一条隐藏的书架记录（已存在则不动），之后用 openReader 打开 */
   putOnlineRecord: (rec: BookRecord) => void
+  /** 在线书架：加入 / 移出（记在这本书的隐藏记录上，随书架同步；没有记录就新建） */
+  setOnlineShelfRecord: (base: BookRecord, shelved: boolean) => void
   /** 书库：记下这本书来自哪个书源、下载了哪些卷（随书架同步） */
   setBookSource: (hash: string, source: BookRecord['source']) => void
   /** 电脑端：书来自书籍文件夹时，把新的文件内容写回文件夹里的原文件（追更后用） */
@@ -538,7 +545,7 @@ export const useStore = create<State>((set, get) => {
         const target = get().folders.find(f => f.collect && f.path)
         if (!target) return
         const done = new Set(target.exported ?? [])
-        const todo = get().library.filter(b => !b.deletedAt && !b.localOnly && b.hasFile && !b.folderRef && !done.has(b.hash))
+        const todo = get().library.filter(b => !b.deletedAt && !b.localOnly && !b.online && b.hasFile && !b.folderRef && !done.has(b.hash))
         if (!todo.length) return
         const known = { ...target.known }
         const pathMap = { ...target.paths }
@@ -933,9 +940,49 @@ export const useStore = create<State>((set, get) => {
       if (canSync()) get().runSync()
     },
 
+    async setBookCover(hash, img) {
+      const rec = get().library.find(b => b.hash === hash)
+      if (!rec || rec.format !== 'epub' || !rec.hasFile) return false
+      try {
+        const bytes = await readBytes(paths.book(hash, rec.format))
+        if (!bytes) throw new Error(tr('本机没有这本书的文件'))
+        const out = img ? setEpubCover(bytes, img) : restoreEpubCover(bytes)
+        if (!out) return false
+        await writeBytes(paths.book(hash, rec.format), out)
+        const t = Date.now()
+        patchBook(hash, b => ({ ...b, size: out.byteLength, fileRev: t, fileRevLocal: t, pendingUpload: !b.localOnly, updatedAt: t }))
+        // 书架上的封面图：从新文件里重新取
+        await extractCover(hash, rec.format, out)
+        const back = await writeBackToFolder(get().library.find(b => b.hash === hash)!, out).catch(e => {
+          console.warn('写回书籍文件夹失败', e)
+          return false
+        })
+        get().showToast((img ? tr('已更换封面') : tr('已恢复原封面')) + (back ? tr('，并已写回书籍文件夹') : ''))
+        if (canSync()) get().runSync()
+        return true
+      } catch (e) {
+        console.error(e)
+        get().showToast(tr('封面没有改成：{e}', { e: e instanceof Error ? e.message : String(e) }))
+        return false
+      }
+    },
+
     putOnlineRecord(rec) {
-      if (get().library.some(b => b.hash === rec.hash)) return
-      putBooks([rec])
+      const cur = get().library.find(b => b.hash === rec.hash)
+      if (!cur) return putBooks([rec])
+      // 旧版本建的记录是“仅本机、有文件”：改成随书架同步、没有文件
+      if (cur.localOnly || cur.hasFile || cur.deletedAt)
+        patchBook(cur.hash, b => ({ ...b, localOnly: undefined, hasFile: false, deletedAt: undefined, updatedAt: Date.now() }))
+    },
+
+    setOnlineShelfRecord(base, shelved) {
+      const now = Date.now()
+      const cur = get().library.find(b => b.hash === base.hash)
+      const online = { ...(cur?.online ?? base.online!), shelved, shelvedAt: now, cover: base.online?.cover || cur?.online?.cover }
+      if (cur)
+        patchBook(cur.hash, b => ({ ...b, online, localOnly: undefined, hasFile: false, deletedAt: undefined, metaUpdatedAt: now, updatedAt: now }))
+      else putBooks([{ ...base, online, metaUpdatedAt: now, updatedAt: now }])
+      get().syncQuick('push')
     },
 
     setBookSource(hash, source) {

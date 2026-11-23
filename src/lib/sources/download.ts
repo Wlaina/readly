@@ -231,8 +231,9 @@ export async function downloadToShelf(src: BookSource, book: SourceBook, volumes
     let done = 0
     let failed = 0
     await Promise.all(
-      // 安卓实测：几个不挂在界面上的网页同时加载时会互相卡住（常常等到 30 秒超时），一次一个反而快得多
-      Array.from({ length: Math.min((window as any).ReadlyAndroid ? 1 : BROWSER_SLOTS, total) }, async (_, slot) => {
+      // 安卓实测：几个不挂在界面上的网页同时加载时会互相卡住（常常等到 30 秒超时），一次一个反而快得多。
+      // 哔哩的正文是直接请求的（不开网页），可以几章同时下
+      Array.from({ length: Math.min((window as any).ReadlyAndroid && src.id !== 'linovelib' ? 1 : BROWSER_SLOTS, total) }, async (_, slot) => {
         while (next < jobs.length) {
           while (pausedKeys.has(key) && !signal.aborted) await sleep(400)
           if (signal.aborted) throw aborted()

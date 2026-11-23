@@ -4,7 +4,7 @@
  * 网站是 GBK 编码，交给隐藏浏览器打开，取回的 DOM 已经是正确的文字。
  * 读书不用登录；搜索要登录（用户在官方登录页里自己登录，Readly 不经手密码）。
  */
-import { abs, loadPage, text } from './browser'
+import { abs, loadPage, SEARCH_SLOT, text } from './browser'
 import { encodeGbk } from './gbk'
 import type { BookSource, ChapterBlock, ChapterContent, SearchHit, SearchOutcome, SourceChapter, SourceVolume } from './types'
 
@@ -127,6 +127,7 @@ async function searchBy(type: 'articlename' | 'author', keyword: string, signal?
       selector: 'body',
       signal,
       desktop: true,
+      slot: SEARCH_SLOT,
     })
     // 没登录时会跳到登录页（有时直接显示登录表单）
     if (isLogin(final) || doc.querySelector('input[name=password]')) return { needLogin: true }
@@ -137,6 +138,8 @@ async function searchBy(type: 'articlename' | 'author', keyword: string, signal?
     }
     // 只有一个结果时直接跳到书页
     const direct = final.match(/\/book\/(\d+)\.htm/)?.[1]
+    // 既不是登录页、也不是搜索结果页（例如被网站换成了别的提示页）：多半是没登录，让用户打开网页看看
+    if (!direct && !doc.querySelector('#content')) return { needLogin: true }
     if (direct) {
       const b = await wenku8.getBook(direct)
       return {

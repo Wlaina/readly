@@ -115,10 +115,11 @@ export interface BookRecord {
   /** 从书库下载的书的来源（随书架同步） */
   source?: SourceRef
   /**
-   * 在线阅读的书（不下载，用主阅读器边读边抓）：书架上不显示、只存在本机（localOnly），
-   * 进度、书签、笔记、统计都记在这条记录上，和本地书一样
+   * 在线阅读的书（不下载，用主阅读器边读边抓）：书架上不显示，也没有书籍文件（hasFile 为 false），
+   * 进度、书签、笔记、统计都记在这条记录上，和本地书一样随书架同步。
+   * shelved：在不在“在线书架”上；shelvedAt：上次加入 / 移出的时间（同步时跟着 metaUpdatedAt 取较新的）
    */
-  online?: { kind: string; id: string }
+  online?: { kind: string; id: string; shelved?: boolean; shelvedAt?: number; cover?: string }
   /** 仅本机阅读，不参与任何云同步 */
   localOnly?: boolean
   /** 书籍文件在 WebDAV 上的位置（手动放入云端目录的书），缺省为 files/<hash>.<ext> */

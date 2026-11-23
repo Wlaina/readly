@@ -91,6 +91,8 @@ fn probe(selector: &str, extract: &str, no_html: bool, wait_all: bool) -> String
   if (window.__readlyOld) return 'OLD';
   if ({ready}) return 'LOADING';
   var t = document.title || '';
+  // Cloudflare 直接拦截（不是验证，等也没用）
+  if (document.querySelector('#cf-error-details,.cf-error-details') || /you have been blocked/i.test(document.body ? document.body.innerText.slice(0, 400) : '')) return 'BLOCKED:Cloudflare 拦截了这次访问';
   if (document.querySelector('#challenge-form,#cf-challenge-running,.cf-turnstile,[id^="cf-chl-"],#challenge-stage') || /Just a moment|请稍候|Attention Required/i.test(t)) return 'CHALLENGE';
   // 网站限流 / 拒绝访问：立刻报错（由下载那边稍等再重试），不要傻等到超时
   if (/Access denied|Too Many Requests|Error 10[0-9][0-9]|访问过于频繁|请求过于频繁/i.test(t)) return 'BLOCKED:' + t.slice(0, 60);

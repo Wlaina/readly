@@ -155,6 +155,7 @@ export function mergeBook(local: BookRecord | undefined, remote: RemoteBook): Bo
     title: metaSrc.title,
     author: metaSrc.author,
     source: metaSrc.source ?? local.source ?? remote.source,
+    online: metaSrc.online ?? local.online ?? remote.online,
     deletedAt: metaSrc.deletedAt,
     metaUpdatedAt: metaSrc.metaUpdatedAt,
     remotePath: local.remotePath ?? remote.remotePath,
@@ -513,7 +514,8 @@ export class SyncEngine {
     const { log } = this.hooks
     const files = new Set(list.map(e => e.name))
     const sizes = new Map(list.map(e => [e.name, e.size]))
-    const books = this.hooks.getLibrary().filter(b => !b.deletedAt && !b.localOnly)
+    // 在线阅读的书没有书籍文件
+    const books = this.hooks.getLibrary().filter(b => !b.deletedAt && !b.localOnly && !b.online)
     const inCloud = (b: BookRecord) => !!b.remotePath || files.has(`${b.hash}.${b.format}`)
     // 上传：云端没有，或本机修改过书籍文件（编辑了书籍信息）
     const uploads = books.filter(b => b.hasFile && ((!b.remotePath && !inCloud(b)) || b.pendingUpload))

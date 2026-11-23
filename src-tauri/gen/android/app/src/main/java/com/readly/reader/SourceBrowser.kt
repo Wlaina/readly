@@ -12,6 +12,7 @@ import android.webkit.CookieManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import android.widget.LinearLayout
 import android.widget.TextView
 import org.json.JSONObject
 
@@ -65,15 +66,38 @@ class SourceBrowser(private val activity: Activity, private val notify: (String)
       CookieManager.getInstance().setAcceptThirdPartyCookies(w, true)
       val f = FrameLayout(activity)
       f.setBackgroundColor(Color.WHITE)
-      f.addView(w, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-      val tip = TextView(activity).apply {
-        text = "完成登录或验证后，按返回键回到 Readly"
-        setTextColor(Color.WHITE)
-        setBackgroundColor(0xCC30302E.toInt())
-        setPadding(32, 20, 32, 20)
-        gravity = Gravity.CENTER
+      // 顶部一条栏：提示 + “关闭”按钮（登录 / 验证完成后点它回到 Readly，返回键也可以）
+      val dp = activity.resources.displayMetrics.density
+      val bar = LinearLayout(activity).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setBackgroundColor(0xFF30302E.toInt())
       }
-      f.addView(tip, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
+      val padBar = { top: Int -> bar.setPadding((16 * dp).toInt(), top + (6 * dp).toInt(), (4 * dp).toInt(), (6 * dp).toInt()) }
+      padBar(0)
+      // 内容会画到状态栏底下：把状态栏的高度让出来
+      @Suppress("DEPRECATION")
+      bar.setOnApplyWindowInsetsListener { _, insets -> padBar(insets.systemWindowInsetTop); insets }
+      val tip = TextView(activity).apply {
+        text = "登录或验证完成后，点「关闭」回到 Readly"
+        setTextColor(0xFFE8E6E1.toInt())
+        textSize = 13f
+      }
+      val close = TextView(activity).apply {
+        text = "关闭"
+        setTextColor(Color.WHITE)
+        textSize = 15f
+        setTypeface(typeface, android.graphics.Typeface.BOLD)
+        setPadding((16 * dp).toInt(), (10 * dp).toInt(), (16 * dp).toInt(), (10 * dp).toInt())
+        isClickable = true
+        setOnClickListener { hide() }
+      }
+      bar.addView(tip, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+      bar.addView(close, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+      val col = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
+      col.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+      col.addView(w, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+      f.addView(col, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
       web = w
       frame = f
       // 平时不挂到界面上（像 LNR 那样的“独立网页”）：挂在界面里时，Readly 一退到后台它就跟着被挂起，
@@ -98,6 +122,7 @@ class SourceBrowser(private val activity: Activity, private val notify: (String)
       val root = activity.findViewById<ViewGroup>(android.R.id.content)
       root.addView(f, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
       f.bringToFront()
+      f.requestApplyInsets()
     }
 
     fun hideFrame() {

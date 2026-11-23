@@ -22,7 +22,7 @@ import {
   useOnlineShelf,
   type OnlineBook,
 } from '../lib/sources/online'
-import { openOnlineInReader } from '../lib/sources/onlinebook'
+import { onlineHash, openOnlineInReader } from '../lib/sources/onlinebook'
 import '../styles-online.css'
 
 export interface OnlineShelfProps {
@@ -99,6 +99,9 @@ function ShelfCard({ book, onOpen, onDetails }: { book: OnlineBook; onOpen: () =
   const showToast = useStore(s => s.showToast)
   const total = chapterCount(book.volumes)
   const read = book.progress ? flatIndex(book.volumes, book.progress) + 1 : 0
+  // 其他设备读过、本机还没打开过：用同步过来的阅读进度
+  const synced = useStore(s => s.library.find(r => r.hash === onlineHash(book.source, book.id))?.progress)
+  const label = !book.progress && synced?.chapter ? `${synced.chapter} · ${Math.round(synced.fraction * 100)}%` : progressLabel(book)
 
   const check = async () => {
     const r = await checkOnlineUpdate(book.key)
@@ -130,9 +133,9 @@ function ShelfCard({ book, onOpen, onDetails }: { book: OnlineBook; onOpen: () =
           {book.title}
         </button>
         <span className="muted">{[book.author, sourceName(book.source)].filter(Boolean).join(' · ')}</span>
-        <span className="ol-progress">{progressLabel(book)}</span>
+        <span className="ol-progress">{label}</span>
         <span className="ol-meta">
-          {total ? tr('{read} / {total} 章', { read, total }) : tr('目录未读取')}
+          {total ? tr('{read} / {total} 章', { read, total }) : tr('打开后读取目录')}
           {book.newChapters > 0 && <b>{tr(' · {n} 章新内容', { n: book.newChapters })}</b>}
           {book.checkedAt > 0 && <> · {tr('{t}检查过', { t: ago(book.checkedAt) })}</>}
         </span>

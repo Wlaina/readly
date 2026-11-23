@@ -1,6 +1,6 @@
 [package]
 name = "readly"
-version = "0.9.1"
+version = "0.10.0"
 description = "Readly — a lean e-book reader"
 edition = "2021"
 

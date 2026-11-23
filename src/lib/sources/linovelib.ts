@@ -4,7 +4,8 @@
  * 章节会分成多页（xxx.html、xxx_2.html …），按“下一页”一直读到换章为止。
  * 搜索在姊妹站 bilinovel 上，要先输入图片验证码（通过后 30 分钟内免验证）。
  */
-import { abs, loadPage, text, type LoadedPage } from './browser'
+import { isAndroid } from '../device'
+import { abs, fetchPage, loadPage, SEARCH_SLOT, text, type LoadedPage } from './browser'
 import type { BookSource, ChapterBlock, FetchOptions, SearchHit, SearchOutcome, SourceChapter, SourceVolume } from './types'
 
 const HOST = 'https://www.linovelib.com'
@@ -48,6 +49,52 @@ const PAGE_EXTRACT = `(function(){
 
 /** 验证码图片：在网页里画到画布上转成 data URL（同源图片，不会被拦） */
 const CAPTCHA_IMAGE = `(function(){ var i = document.querySelector('img[src*="checkcode"]'); if (!i || !i.naturalWidth) return null; var c = document.createElement('canvas'); c.width = i.naturalWidth; c.height = i.naturalHeight; c.getContext('2d').drawImage(i, 0, 0); return c.toDataURL('image/png') })()`
+
+/**
+ * 直接用 HTTP 取页面（不开网页）：书页、目录、正文都不靠网页脚本，快得多，还能几章同时下。
+ * 正文页只要带上 Accept-Language，服务器就给完整内容；段落顺序用 restoreParagraphs 还原（和 LNR 一样）。
+ * 连续失败几次（例如网站开始要求人机验证）就暂时改回隐藏网页
+ */
+let httpFailures = 0
+const HTTP_GAP = 250
+async function httpDoc(url: string, selector: string, signal?: AbortSignal): Promise<Document | null> {
+  if (httpFailures >= 3) return null
+  try {
+    const { doc } = await fetchPage(url, signal, HTTP_GAP)
+    if (!doc.querySelector(selector)) throw new Error('页面结构不对')
+    httpFailures = 0
+    return doc
+  } catch (e) {
+    if (signal?.aborted) throw e
+    // 过一会儿再给 HTTP 一次机会
+    if (++httpFailures >= 3) setTimeout(() => (httpFailures = 0), 5 * 60_000)
+    console.warn('直接请求失败，改用网页', url, e)
+    return null
+  }
+}
+
+/** 一页正文（HTTP 取回的 HTML）：段落按章节号还原顺序，插图留在原来的位置 */
+function pageFromHtml(doc: Document, cid: string): PageData | null {
+  const box = doc.querySelector('#TextContent')
+  if (!box || /內容加載失敗|内容加载失败/.test(box.textContent ?? '')) return null
+  const items = [...box.querySelectorAll(':scope > p, img')]
+  const paras = items.filter(e => e.tagName === 'P')
+  const ordered = restoreParagraphs(cid, paras)
+  let pi = 0
+  const blocks: ChapterBlock[] = items.map(e =>
+    e.tagName === 'P'
+      ? { type: 'p', text: (ordered[pi++].textContent ?? '').trim() }
+      : { type: 'img', src: abs(doc, e.getAttribute('data-src') || e.getAttribute('src')) },
+  )
+  const m = doc.documentElement.innerHTML.match(/url_next\s*:\s*['"]([^'"]*)['"]/)
+  let next = m ? m[1] : ''
+  if (!next) next = [...doc.querySelectorAll('a')].find(a => ['下一页', '下一章'].includes(text(a)))?.getAttribute('href') ?? ''
+  return {
+    title: text(doc.querySelector('#mlfy_main_text h1, h1')),
+    blocks,
+    next: next ? abs(doc, next) : '',
+  }
+}
 
 const bookIdOf = (href: string | null | undefined) => href?.match(/\/novel\/(\d+)\.html/)?.[1]
 
@@ -99,6 +146,27 @@ async function searchResult(page: LoadedPage): Promise<SearchOutcome> {
   return { hits: parseHits(page.doc) }
 }
 
+type PageData = { title: string; blocks: ChapterBlock[]; next: string }
+
+/** 读一页正文：先直接请求，不行再用隐藏网页 */
+async function readPage(url: string, cid: string, o: FetchOptions): Promise<PageData | null> {
+  const doc = await httpDoc(url, '#TextContent', o.signal)
+  const fast = doc && pageFromHtml(doc, cid)
+  if (fast) return fast
+  // 在网页里直接取出正文和下一页地址（不把整页 HTML 传回来再解析，下载时主界面不卡）。
+  // 安卓上几个隐藏网页同时开会卡住，退回网页时都排在同一个上
+  const { data } = await loadPage(url, {
+    selector: '#TextContent',
+    extract: PAGE_EXTRACT,
+    desktop: true,
+    noHtml: true,
+    waitAll: true,
+    ...o,
+    slot: isAndroid ? 0 : o.slot,
+  })
+  return data as PageData | null
+}
+
 /** 链接坏掉的章节：一页页翻完上一章，最后一页的“下一章”就是本章的地址（结果记住，不重复找） */
 const resolvedUrls = new Map<SourceChapter, Promise<string>>()
 function resolveUrl(ch: SourceChapter, o: FetchOptions): Promise<string> {
@@ -111,15 +179,7 @@ function resolveUrl(ch: SourceChapter, o: FetchOptions): Promise<string> {
       let url = prev.url || (await resolveUrl(prev, o))
       const prevId = url.match(/\/(\d+)\.html/)?.[1] ?? ''
       for (let i = 0; i < 30 && url; i++) {
-        const { data } = await loadPage(url, {
-          selector: '#TextContent',
-          extract: PAGE_EXTRACT,
-          desktop: true,
-          noHtml: true,
-          waitAll: true,
-          ...o,
-        })
-        const next = (data as { next?: string } | null)?.next ?? ''
+        const next = (await readPage(url, prevId, o))?.next ?? ''
         if (next && new RegExp(`/${prevId}_[0-9]+[.]html`).test(next)) {
           url = next
           continue
@@ -156,6 +216,7 @@ export const linovelib: BookSource = {
       desktop: true,
       images: true,
       waitAll: true,
+      slot: SEARCH_SLOT,
       signal,
     })
     return searchResult(page)
@@ -169,6 +230,7 @@ export const linovelib: BookSource = {
       desktop: true,
       images: true,
       waitAll: true,
+      slot: SEARCH_SLOT,
       signal,
       action: `var i = document.querySelector('#search_code, input[name=search_code]'); if (i) { i.value = ${safe}; (i.form || document.forms[0]).submit(); }`,
     })
@@ -176,10 +238,8 @@ export const linovelib: BookSource = {
   },
 
   async getBook(id) {
-    const { doc } = await loadPage(`${HOST}/novel/${id}.html`, {
-      selector: '.book-info',
-      desktop: true,
-    })
+    const url = `${HOST}/novel/${id}.html`
+    const doc = (await httpDoc(url, '.book-info')) ?? (await loadPage(url, { selector: '.book-info', desktop: true })).doc
     const info = doc.querySelector('.book-info')
     const nums = [...(info?.querySelectorAll('.nums span') ?? [])].map(s => text(s))
     return {
@@ -196,10 +256,9 @@ export const linovelib: BookSource = {
   },
 
   async getVolumes(id) {
-    const { doc } = await loadPage(`${HOST}/novel/${id}/catalog`, {
-      selector: '.volume-list, .chapter-list',
-      desktop: true,
-    })
+    const url = `${HOST}/novel/${id}/catalog`
+    const doc =
+      (await httpDoc(url, '.volume-list, .chapter-list')) ?? (await loadPage(url, { selector: '.volume-list, .chapter-list', desktop: true })).doc
     let prev: SourceChapter | undefined
     const vols: SourceVolume[] = [...doc.querySelectorAll('.volume')].map((v, i) => ({
       id:
@@ -236,20 +295,7 @@ export const linovelib: BookSource = {
     const cid = url.match(/\/(\d+)\.html/)?.[1] ?? ch.id
     let title = ''
     for (let page = 1; page <= 30 && url; page++) {
-      // 在网页里直接取出正文和下一页地址（不把整页 HTML 传回来再解析，下载时主界面不卡）
-      const { data } = await loadPage(url, {
-        selector: '#TextContent',
-        extract: PAGE_EXTRACT,
-        desktop: true,
-        noHtml: true,
-        waitAll: true,
-        ...o,
-      })
-      const r = data as {
-        title: string
-        blocks: ChapterBlock[]
-        next: string
-      } | null
+      const r = await readPage(url, cid, o)
       if (!r || !Array.isArray(r.blocks)) throw new Error('找不到正文')
       title ||= r.title.trim()
       for (const b of r.blocks) if (b.type === 'img' ? b.src : b.text) blocks.push(b)

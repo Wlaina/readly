@@ -1,7 +1,7 @@
 /**
  * 在线阅读用主阅读器打开：给阅读引擎一本“虚拟书”。
  * 目录是网站上的章节（按卷分组），翻到哪一章才去抓哪一章（插图一起取回），抓过的章节有缓存，下一章会预先抓好。
- * 书架上有一条隐藏的记录（BookRecord.online，只存在本机、不同步），进度、书签、划线、笔记、统计都记在它上面，
+ * 书架上有一条隐藏的记录（BookRecord.online，没有书籍文件，随书架同步），进度、书签、划线、笔记、统计都记在它上面，
  * 和本地书用的是同一套阅读器、同一套外观与操作。
  */
 import { useStore } from '../store'
@@ -13,7 +13,9 @@ import {
   getOnlineChapter,
   loadOnlineImage,
   markOnlineOpened,
+  onlineHash,
   onlineKey,
+  onlineRecordFor,
   prefetchOnlineChapter,
   saveOnlineProgress,
   sourceOf,
@@ -21,7 +23,7 @@ import {
   type OnlineBookMeta,
 } from './online'
 
-export const onlineHash = (source: string, id: string) => `online-${source}-${id}`
+export { onlineHash }
 
 const esc = (s: string) => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!)
 
@@ -36,26 +38,15 @@ export async function openOnlineInReader(meta: OnlineBookMeta, volumes?: SourceV
   const ob = useOnline.getState().books[key]
   const st = useStore.getState()
   const hash = onlineHash(meta.source, meta.id)
-  const now = Date.now()
-  const rec: BookRecord = {
-    hash,
-    title: ob?.title || meta.title,
-    author: ob?.author || meta.author || '',
-    // 用 txt 的排版（纯段落，首行缩进）
-    format: 'txt',
-    fileName: `${meta.title}.online`,
-    size: 0,
-    addedAt: now,
-    metaUpdatedAt: now,
-    bookmarks: [],
-    hasFile: true,
-    hasCover: false,
-    coverChecked: true,
-    localOnly: true,
-    online: { kind: meta.source, id: meta.id },
-    updatedAt: now,
-  }
-  st.putOnlineRecord(rec)
+  st.putOnlineRecord(
+    onlineRecordFor({
+      source: meta.source,
+      id: meta.id,
+      title: ob?.title || meta.title,
+      author: ob?.author || meta.author || '',
+      cover: ob?.cover || meta.cover || '',
+    }),
+  )
   markOnlineOpened(key)
   st.openReader(hash)
 }

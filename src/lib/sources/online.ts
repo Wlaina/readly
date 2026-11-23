@@ -6,10 +6,14 @@
  * - 章节正文：内存缓存 + 预取下一章。正文走隐藏网页 slot 0（与搜索共用），预取走 slot 1。
  *   同一个槽位一次只开一页，这里自己排队；排队中没人要了的请求直接丢掉，不白白占着网页。
  * - 检查更新：重新取目录，和快照比章节数，记下新章节数并换上新目录（进度按章节 id 重新定位）。
+ * - 同步：每本在线书在书架上有一条隐藏记录（BookRecord.online），“在不在在线书架上”记在它上面，
+ *   随书架同步到其他设备；其他设备同步下来的记录在这里补成在线书架上的书（目录等打开时再取）。
  */
 import { useEffect, useState } from 'react'
 import { create } from 'zustand'
 import { paths, readJSON, writeJSON } from '../storage'
+import { useStore } from '../store'
+import type { BookRecord } from '../types'
 import { tr } from '../i18n'
 import { activeDownloads, fetchImage } from './download'
 import { wenku8 } from './wenku8'
@@ -123,6 +127,36 @@ export function sourceOf(id: string): BookSource {
 }
 
 export const onlineKey = (source: string, id: string) => `${source}:${id}`
+/** 在线书在书架上的隐藏记录的 hash */
+export const onlineHash = (source: string, id: string) => `online-${source}-${id}`
+
+/** 在线书的隐藏记录（新建用的模板）：没有书籍文件，随书架同步 */
+export function onlineRecordFor(b: Pick<OnlineBook, 'source' | 'id' | 'title' | 'author' | 'cover'>, shelved = false): BookRecord {
+  const now = Date.now()
+  return {
+    hash: onlineHash(b.source, b.id),
+    title: b.title,
+    author: b.author || '',
+    // 用 txt 的排版（纯段落，首行缩进）
+    format: 'txt',
+    fileName: `${b.title}.online`,
+    size: 0,
+    addedAt: now,
+    metaUpdatedAt: now,
+    bookmarks: [],
+    hasFile: false,
+    hasCover: false,
+    coverChecked: true,
+    online: { kind: b.source, id: b.id, shelved, cover: b.cover || undefined },
+    updatedAt: now,
+  }
+}
+
+/** 把“在不在在线书架上”写到隐藏记录上（随书架同步） */
+function recordShelf(key: string) {
+  const b = useOnline.getState().books[key]
+  if (b) useStore.getState().setOnlineShelfRecord(onlineRecordFor(b, b.shelved), b.shelved)
+}
 
 /* ---------- 持久化 ---------- */
 
@@ -283,6 +317,7 @@ export async function addToOnlineShelf(meta: OnlineBookMeta, volumes?: SourceVol
     shelved: true,
     addedAt: b.addedAt || Date.now(),
   }))
+  recordShelf(key)
   return key
 }
 
@@ -290,6 +325,7 @@ export async function addToOnlineShelf(meta: OnlineBookMeta, volumes?: SourceVol
 export async function removeFromOnlineShelf(key: string) {
   await loadOnline()
   patchBook(key, b => ({ ...b, shelved: false, addedAt: 0 }))
+  recordShelf(key)
   pruneLoose()
   persist()
 }
@@ -737,4 +773,75 @@ export function useOnShelf(source: string, id: string): boolean {
     if (!loaded) void loadOnline()
   }, [loaded])
   return useOnline(s => !!s.books[onlineKey(source, id)]?.shelved)
+}
+
+/* ---------- 与书架记录对齐（同步） ---------- */
+
+/**
+ * 书架记录 → 在线书架：其他设备加入 / 移出的书在这里跟上；
+ * 旧版本只存在本机的在线书架，补建成会同步的记录。
+ */
+function reconcile(library: BookRecord[]) {
+  const books = useOnline.getState().books
+  const next = { ...books }
+  let changed = false
+  const recs = new Map<string, BookRecord>()
+  for (const r of library) {
+    const o = r.online
+    if (!o) continue
+    const key = onlineKey(o.kind, o.id)
+    recs.set(key, r)
+    // 旧版本的记录：仅本机、标着有文件
+    if (r.localOnly || r.hasFile) useStore.getState().putOnlineRecord(r)
+    if (o.shelvedAt === undefined) continue
+    const shelved = !!o.shelved && !r.deletedAt
+    const cur = next[key]
+    if (!cur) {
+      if (!shelved) continue
+      next[key] = {
+        key,
+        source: o.kind,
+        id: o.id,
+        title: r.title,
+        author: r.author,
+        cover: o.cover || '',
+        volumes: [],
+        progress: null,
+        shelved: true,
+        addedAt: o.shelvedAt,
+        readAt: r.lastReadAt ?? 0,
+        checkedAt: 0,
+        newChapters: 0,
+        bookmarks: [],
+      }
+      changed = true
+    } else if (cur.shelved !== shelved) {
+      next[key] = { ...cur, shelved, addedAt: shelved ? o.shelvedAt || cur.addedAt : 0 }
+      changed = true
+    }
+  }
+  if (changed) {
+    useOnline.setState({ books: next })
+    persist()
+  }
+  // 本机书架上有、记录上还没记的（旧版本加的）：补上
+  for (const b of Object.values(next)) {
+    const r = recs.get(b.key)
+    if (b.shelved && r?.online?.shelvedAt === undefined) recordShelf(b.key)
+  }
+}
+
+let reconcileTimer: ReturnType<typeof setTimeout> | undefined
+function scheduleReconcile() {
+  clearTimeout(reconcileTimer)
+  reconcileTimer = setTimeout(async () => {
+    await loadOnline()
+    if (useStore.getState().ready) reconcile(useStore.getState().library)
+  }, 400)
+}
+if (typeof window !== 'undefined') {
+  useStore.subscribe((s, prev) => {
+    if (s.library !== prev.library || s.ready !== prev.ready) scheduleReconcile()
+  })
+  scheduleReconcile()
 }

@@ -18,6 +18,8 @@ export const browserSupported = isTauri && (!isAndroid || !!bridge()?.browserLoa
 
 /** 同时最多几个隐藏网页（下载时并行抓几章）；与 Rust / Kotlin 里的 SLOTS 一致 */
 export const BROWSER_SLOTS = 3
+/** 搜索（含提交验证码）专用的网页：不和后台检查更新、在线阅读、下载排同一个队 */
+export const SEARCH_SLOT = BROWSER_SLOTS - 1
 
 /**
  * 页面状态探测脚本（安卓端用；电脑端在 Rust 里有同样的一份，两边要一起改）：
@@ -30,6 +32,8 @@ function probe(selector: string, extract: string, noHtml: boolean, waitAll: bool
   if (window.__readlyOld) return 'OLD';
   if (${waitAll ? "document.readyState !== 'complete'" : "document.readyState === 'loading'"}) return 'LOADING';
   var t = document.title || '';
+  // Cloudflare 直接拦截（不是验证，等也没用）
+  if (document.querySelector('#cf-error-details,.cf-error-details') || /you have been blocked/i.test(document.body ? document.body.innerText.slice(0, 400) : '')) return 'BLOCKED:Cloudflare 拦截了这次访问';
   if (document.querySelector('#challenge-form,#cf-challenge-running,.cf-turnstile,[id^="cf-chl-"],#challenge-stage') || /Just a moment|请稍候|Attention Required/i.test(t)) return 'CHALLENGE';
   // 网站限流 / 拒绝访问：立刻报错（由下载那边稍等再重试），不要傻等到超时
   if (/Access denied|Too Many Requests|Error 10[0-9][0-9]|访问过于频繁|请求过于频繁/i.test(t)) return 'BLOCKED:' + t.slice(0, 60);
@@ -112,10 +116,11 @@ const MIN_GAP: [RegExp, number][] = [
   [/linovelib\.|bilinovel\./, 700],
 ]
 const nextAt = new Map<RegExp, number>()
-async function rateLimit(url: string, signal?: AbortSignal) {
+async function rateLimit(url: string, signal?: AbortSignal, gapOverride?: number) {
   const rule = MIN_GAP.find(([re]) => re.test(url))
   if (!rule) return
-  const [re, gap] = rule
+  const [re, ruleGap] = rule
+  const gap = gapOverride ?? ruleGap
   const now = Date.now()
   const at = Math.max(now, nextAt.get(re) ?? 0)
   nextAt.set(re, at + gap)
@@ -184,6 +189,33 @@ async function loadPageOnce(url: string, o: LoadOptions): Promise<LoadedPage> {
   base.href = r.url
   doc.head.prepend(base)
   return { url: r.url, doc, data: r.data }
+}
+
+const DESKTOP_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+
+/**
+ * 不开网页、直接用 HTTP 取一页 HTML（快得多，也能多个同时进行）。
+ * 只适合不靠网页脚本就能拿到完整内容的页面；遇到人机验证等情况抛错，由调用方退回 loadPage。
+ * gap：同一网站两次请求的最小间隔（毫秒），缺省按 MIN_GAP
+ */
+export async function fetchPage(url: string, signal?: AbortSignal, gap?: number): Promise<{ url: string; doc: Document }> {
+  if (!isTauri) throw new Error('当前平台暂不支持书源')
+  await rateLimit(url, signal, gap)
+  const { fetch } = await import('@tauri-apps/plugin-http')
+  const res = await fetch(url, {
+    // 哔哩不带 Accept-Language 时只给半章正文（后面是“内容加载失败”）
+    headers: { 'User-Agent': DESKTOP_UA, 'Accept-Language': 'zh-CN,zh;q=0.9' },
+    signal,
+  })
+  if (!res.ok) throw new Error(`网站返回 ${res.status}`)
+  const html = await res.text()
+  const doc = new DOMParser().parseFromString(html, 'text/html')
+  if (/Just a moment|Attention Required|请稍候/i.test(doc.title)) throw new Error('需要人机验证')
+  const final = res.url || url
+  const base = doc.createElement('base')
+  base.href = final
+  doc.head.prepend(base)
+  return { url: final, doc }
 }
 
 /** 显示书源网页窗口（登录 / 手动完成人机验证）；autoClose：登录完成、跳离登录页后自动收起 */

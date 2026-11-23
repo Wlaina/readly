@@ -228,7 +228,7 @@ function App() {
     // 上次是在阅读途中被系统回收（或崩溃）的：不管有没有开“启动时继续阅读”，都直接回到那本书
     const cut = interruptedBook()
     if (openPaths.length || st.reading || !st.settings.onboarded) return
-    const readable = st.library.filter(b => !b.deletedAt && b.hasFile)
+    const readable = st.library.filter(b => !b.deletedAt && (b.hasFile || b.online))
     const back = cut ? readable.find(b => b.hash === cut) : undefined
     if (back) {
       console.info(`上次在阅读途中被中断，已回到《${back.title}》`)
