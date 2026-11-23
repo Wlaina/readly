@@ -357,6 +357,59 @@ async fn fetch_image(url: String, referer: String) -> Result<tauri::ipc::Respons
     Ok(tauri::ipc::Response::new(bytes.to_vec()))
 }
 
+/// 上传书籍文件到 WebDAV，并按已发出的字节数发 `dav-upload-progress` 事件（[任务 id, 已发字节]）。
+/// 网页里的 fetch 拿不到上传进度，所以书籍文件走这里。请求体是文件内容；
+/// 地址、认证、类型、任务 id 在请求头 x-url / x-auth / x-type / x-task 中。返回 ETag；失败返回 “HTTP 状态码”
+#[tauri::command]
+async fn dav_upload(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> Result<String, String> {
+    use tauri::Emitter;
+    use tauri_plugin_http::reqwest;
+    let tauri::ipc::InvokeBody::Raw(raw) = request.body() else {
+        return Err("需要二进制内容".into());
+    };
+    let header = |k: &str| -> Result<String, String> {
+        request.headers().get(k).and_then(|v| v.to_str().ok()).map(String::from).ok_or(format!("缺少 {k}"))
+    };
+    let url = header("x-url")?;
+    let auth = header("x-auth")?;
+    let ctype = header("x-type")?;
+    let task = header("x-task")?;
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("只允许网页地址".into());
+    }
+    let data = bytes::Bytes::from(raw.clone());
+    let total = data.len();
+    const CHUNK: usize = 256 * 1024;
+    let chunks: Vec<bytes::Bytes> = (0..total).step_by(CHUNK).map(|i| data.slice(i..(i + CHUNK).min(total))).collect();
+    let mut sent = 0usize;
+    let emitter = app.clone();
+    // 每取走一块就报一次进度（取走 = 交给网络层发送）
+    let stream = futures_util::stream::iter(chunks.into_iter().map(move |c| {
+        sent += c.len();
+        let _ = emitter.emit("dav-upload-progress", (task.clone(), sent));
+        Ok::<_, std::io::Error>(c)
+    }));
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .put(&url)
+        .header("Authorization", auth)
+        .header("Content-Type", ctype)
+        // 有些网盘不接受分块传输：给出总长度
+        .header("Content-Length", total.to_string())
+        .body(reqwest::Body::wrap_stream(stream))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status().as_u16()));
+    }
+    let etag = resp.headers().get("ETag").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    Ok(etag)
+}
+
 /// 安卓：读取 MainActivity 复制到缓存目录的书籍文件，读完即删
 #[tauri::command]
 fn read_cache_file(path: String) -> Result<tauri::ipc::Response, String> {
@@ -586,7 +639,8 @@ pub fn run() {
             browser_show,
             browser_hide,
             browser_cancel,
-            fetch_image
+            fetch_image,
+            dav_upload
         ])
         .run(tauri::generate_context!())
         .expect("error while running Readly");

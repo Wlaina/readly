@@ -498,11 +498,11 @@ export class SyncEngine {
     }
   }
 
-  /** 上传书籍文件并记录为传输任务（浏览器接口无法报告上传进度，显示文件大小） */
+  /** 上传书籍文件并记录为传输任务（应用里有上传进度；浏览器里只能显示文件大小） */
   private async upload(path: string, title: string, bytes: Uint8Array) {
-    const id = startTask('upload', title, { total: bytes.byteLength, unit: 'bytes' })
+    const id = startTask('upload', title, { total: bytes.byteLength, loaded: 0, unit: 'bytes' })
     try {
-      await this.dav.put(path, bytes)
+      await this.dav.putProgress(path, bytes, sent => updateTask(id, { loaded: sent }))
       endTask(id)
     } catch (e) {
       endTask(id, e)

@@ -184,6 +184,34 @@ export class WebDAV {
     return (res.headers.get('ETag') ?? '').replace(/^W\//, '').replace(/"/g, '')
   }
 
+  /**
+   * 带进度的上传（书籍文件用）。网页里的 fetch 报告不了上传进度，应用里交给原生层上传；
+   * 浏览器里退回普通上传（只在完成时报一次）
+   */
+  async putProgress(path: string, data: Uint8Array, onProgress: (sent: number) => void) {
+    if (!isTauri) {
+      const etag = await this.put(path, data)
+      onProgress(data.byteLength)
+      return etag
+    }
+    const { invoke } = await import('@tauri-apps/api/core')
+    const { listen } = await import('@tauri-apps/api/event')
+    const task = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+    const stop = await listen<[string, number]>('dav-upload-progress', e => e.payload[0] === task && onProgress(e.payload[1]))
+    this.requests++
+    try {
+      const etag = await invoke<string>('dav_upload', data, {
+        headers: { 'x-url': this.url(path), 'x-auth': this.auth, 'x-type': 'application/octet-stream', 'x-task': task },
+      })
+      return etag.replace(/^W\//, '').replace(/"/g, '')
+    } catch (e) {
+      const status = Number(String(e).match(/^HTTP (\d+)/)?.[1])
+      throw status ? new DavError(status, `PUT ${path} ${status}`) : new Error(String(e))
+    } finally {
+      stop()
+    }
+  }
+
   putJSON(path: string, data: unknown) {
     return this.put(path, JSON.stringify(data), 'application/json; charset=utf-8')
   }

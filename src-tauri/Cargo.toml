@@ -19,6 +19,10 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 percent-encoding = "2"
+# 上传书籍文件时报告进度（和 tauri-plugin-http 用同一份 reqwest，只多开 stream）
+reqwest = { version = "0.12", default-features = false, features = ["stream"] }
+futures-util = { version = "0.3", default-features = false }
+bytes = "1"
 
 tokio = { version = "1", features = ["time", "sync"] }
 
