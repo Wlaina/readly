@@ -39,6 +39,30 @@ function build(items: TocItem[], depth = 0, prefix = '', parents: string[] = [],
 const THUMB = 44
 
 /**
+ * 目录面板要多宽才能把卷名、章名完整显示在一行：量出最长的一行（含缩进、卷的箭头和章数），
+ * 面板按它变宽（最窄 320、最宽 640，手机上不超过屏幕，放不下的再折成两行）
+ */
+export function tocWidth(toc: TocItem[]): number {
+  const ctx = document.createElement('canvas').getContext('2d')
+  if (!ctx) return 320
+  const family = getComputedStyle(document.body).fontFamily
+  let max = 0
+  const walk = (items: TocItem[], depth: number) => {
+    for (const it of items) {
+      const group = !!it.subitems?.length
+      ctx.font = `${group ? 500 : 400} 14px ${family}`
+      // 左右内边距 20 + 缩进 + 箭头 21 + 章数 / 进度 52
+      const w = ctx.measureText(it.label?.trim() ?? '').width + 20 + depth * 16 + (group ? 21 : 0) + 52
+      if (w > max) max = w
+      if (group) walk(it.subitems!, depth + 1)
+    }
+  }
+  walk(toc, 0)
+  // 面板左右边距 36、列表右侧的进度条 30
+  return Math.round(Math.min(640, Math.max(320, max + 66)))
+}
+
+/**
  * 目录：
  * - 有分卷的书：卷可以展开/收起（点卷名只展开，不跳转）；打开时自动展开正在读的那一卷
  * - 右侧可拖动的进度条上标出每一卷的位置（小刻度），正在读的那一卷高亮，“上次读到”是圆点

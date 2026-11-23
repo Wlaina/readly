@@ -16,7 +16,7 @@
  */
 import type { Annotation, BookRecord, Bookmark, Category } from './types'
 import type { Settings } from './settings'
-import { WebDAV, type DavEntry, type WebDAVConfig } from './webdav'
+import { DavError, WebDAV, type DavEntry, type WebDAVConfig } from './webdav'
 import { deviceClass, getDevice } from './device'
 import { endTask, startTask, updateTask } from './tasks'
 import { tr } from './i18n'
@@ -238,6 +238,13 @@ export interface SyncHooks {
   saveBooks: (books: BookRecord[]) => void
   readBookFile: (rec: BookRecord) => Promise<Uint8Array | null>
   writeBookFile: (rec: BookRecord, bytes: Uint8Array) => Promise<void>
+  /**
+   * 应用里：书籍文件在应用数据目录里的相对路径。有它时书籍文件由原生层直接从磁盘上传、下载到磁盘
+   * （有真实进度；安卓上不会因为在网页和原生层之间搬几十 MB 而卡住界面）
+   */
+  localBookPath?: (rec: BookRecord) => string | null
+  /** 原生层把书籍文件下载到磁盘之后（提取封面、写回书籍文件夹等） */
+  bookFileWritten?: (rec: BookRecord) => Promise<void>
   /** 导入云端手动放入的书，返回生成的记录 */
   importRemoteFile: (name: string, bytes: Uint8Array, remotePath: string) => Promise<BookRecord | null>
   getSettings: () => Settings
@@ -379,10 +386,8 @@ export class SyncEngine {
   /** 上传一本书的文件（用户选择“上传云端”时） */
   async uploadFile(rec: BookRecord) {
     if (rec.remotePath) return
-    const bytes = await this.hooks.readBookFile(rec)
-    if (!bytes) return
     await this.dav.ensureDir(`${this.root}/files`)
-    await this.dav.put(this.filePath(rec), bytes)
+    await this.uploadBook(rec)
   }
 
   /** v1 → v2：把旧的 books/*.json 读进来合并一次 */
@@ -498,14 +503,51 @@ export class SyncEngine {
     }
   }
 
-  /** 上传书籍文件并记录为传输任务（应用里有上传进度；浏览器里只能显示文件大小） */
-  private async upload(path: string, title: string, bytes: Uint8Array) {
-    const id = startTask('upload', title, { total: bytes.byteLength, loaded: 0, unit: 'bytes' })
+  /**
+   * 上传一本书的书籍文件，记录为传输任务。应用里交给原生层从磁盘直接上传（有真实进度）；
+   * 进度到头后还要等云端收完、存好才算完成，这段时间显示 99%，不让人以为卡在 100%
+   */
+  private async uploadBook(rec: BookRecord) {
+    const local = this.hooks.localBookPath?.(rec)
+    const id = startTask('upload', rec.title, { total: rec.size || undefined, loaded: 0, unit: 'bytes' })
     try {
-      await this.dav.putProgress(path, bytes, sent => updateTask(id, { loaded: sent }))
+      if (local) {
+        await this.dav.transferFile('upload', this.filePath(rec), local, (sent, total) =>
+          updateTask(id, { loaded: Math.min(sent, Math.floor(total * 0.99)), total }),
+        )
+      } else {
+        const bytes = await this.hooks.readBookFile(rec)
+        if (!bytes) throw new Error(tr('读不到书籍文件'))
+        await this.dav.put(this.filePath(rec), bytes)
+      }
       endTask(id)
     } catch (e) {
       endTask(id, e)
+      throw e
+    }
+  }
+
+  /**
+   * 下载一本书的书籍文件到本机，记录为传输任务。应用里由原生层边下边写进磁盘，
+   * 浏览器里下载后再写入
+   */
+  private async downloadBook(rec: BookRecord, size = 0) {
+    const local = this.hooks.localBookPath?.(rec)
+    if (!local) {
+      const bytes = await this.download(this.filePath(rec), rec.title, size)
+      await this.hooks.writeBookFile(rec, bytes)
+      return bytes.byteLength
+    }
+    const id = startTask('download', rec.title, { total: size || undefined, loaded: 0, unit: 'bytes' })
+    try {
+      const got = Number(
+        await this.dav.transferFile('download', this.filePath(rec), local, (loaded, total) => updateTask(id, { loaded, total: total || size || undefined })),
+      )
+      endTask(id)
+      await this.hooks.bookFileWritten?.(rec)
+      return got
+    } catch (e) {
+      endTask(id, e instanceof DavError && e.status === 404 ? new Error(tr('云端没有这个文件')) : e)
       throw e
     }
   }
@@ -525,10 +567,12 @@ export class SyncEngine {
     )
     let uploaded = 0
     await pool(uploads, 3, async rec => {
-      const bytes = await this.hooks.readBookFile(rec)
-      if (!bytes) return
       log(tr('上传《{title}》', { title: rec.title }))
-      await this.upload(this.filePath(rec), rec.title, bytes)
+      const ok = await this.uploadBook(rec).then(
+        () => true,
+        e => (log(tr('上传《{title}》失败：{e}', { title: rec.title, e: e instanceof Error ? e.message : String(e) })), false),
+      )
+      if (!ok) return
       const cur = this.hooks.getLibrary().find(b => b.hash === rec.hash)
       // 上传途中文件又被改了：这次传的不是最新的，留到下次再传
       if (cur?.pendingUpload && (cur.fileRev ?? 0) === (rec.fileRev ?? 0)) {
@@ -540,11 +584,10 @@ export class SyncEngine {
     if (uploaded) await this.push()
     await pool(downloads, 3, async rec => {
       log(tr(rec.hasFile ? '更新《{title}》' : '下载《{title}》', { title: rec.title }))
-      const bytes = await this.download(this.filePath(rec), rec.title, sizes.get(`${rec.hash}.${rec.format}`)).catch(() => null)
-      if (!bytes) return
-      await this.hooks.writeBookFile(rec, bytes)
+      const size = await this.downloadBook(rec, sizes.get(`${rec.hash}.${rec.format}`)).catch(() => null)
+      if (size == null) return
       const cur = this.hooks.getLibrary().find(b => b.hash === rec.hash)
-      if (cur) this.hooks.saveBooks([{ ...cur, hasFile: true, fileRevLocal: cur.fileRev ?? 0, size: bytes.byteLength }])
+      if (cur) this.hooks.saveBooks([{ ...cur, hasFile: true, fileRevLocal: cur.fileRev ?? 0, size }])
     })
   }
 
@@ -576,9 +619,12 @@ export class SyncEngine {
 
   /** 下载单个书籍文件（点击云端书籍时） */
   async downloadFile(rec: BookRecord) {
-    const bytes = await this.download(this.filePath(rec), rec.title).catch(() => null)
+    const ok = await this.downloadBook(rec, rec.size).then(
+      () => true,
+      () => false,
+    )
+    const bytes = ok ? await this.hooks.readBookFile(rec) : null
     if (!bytes) throw new Error(tr('云端没有这本书的文件，请在原设备开启“同步书籍文件”'))
-    await this.hooks.writeBookFile(rec, bytes)
     return bytes
   }
 

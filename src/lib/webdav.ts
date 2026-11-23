@@ -185,28 +185,21 @@ export class WebDAV {
   }
 
   /**
-   * 带进度的上传（书籍文件用）。网页里的 fetch 报告不了上传进度，应用里交给原生层上传；
-   * 浏览器里退回普通上传（只在完成时报一次）
+   * 应用里：书籍文件交给原生层直接从磁盘上传 / 下载到磁盘（file 是应用数据目录里的相对路径，例如 books/xxx.epub），
+   * 不经过网页，有真实的进度；安卓上也不会因为把几十 MB 在网页和原生层之间搬来搬去而卡住界面。
+   * onProgress(已传, 总数)
    */
-  async putProgress(path: string, data: Uint8Array, onProgress: (sent: number) => void) {
-    if (!isTauri) {
-      const etag = await this.put(path, data)
-      onProgress(data.byteLength)
-      return etag
-    }
+  async transferFile(kind: 'upload' | 'download', path: string, file: string, onProgress: (done: number, total: number) => void) {
     const { invoke } = await import('@tauri-apps/api/core')
     const { listen } = await import('@tauri-apps/api/event')
     const task = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
-    const stop = await listen<[string, number]>('dav-upload-progress', e => e.payload[0] === task && onProgress(e.payload[1]))
+    const stop = await listen<[string, number, number]>('dav-progress', e => e.payload[0] === task && onProgress(e.payload[1], e.payload[2]))
     this.requests++
     try {
-      const etag = await invoke<string>('dav_upload', data, {
-        headers: { 'x-url': this.url(path), 'x-auth': this.auth, 'x-type': 'application/octet-stream', 'x-task': task },
-      })
-      return etag.replace(/^W\//, '').replace(/"/g, '')
+      return await invoke<string | number>(kind === 'upload' ? 'dav_upload' : 'dav_download', { url: this.url(path), auth: this.auth, file, task })
     } catch (e) {
       const status = Number(String(e).match(/^HTTP (\d+)/)?.[1])
-      throw status ? new DavError(status, `PUT ${path} ${status}`) : new Error(String(e))
+      throw status ? new DavError(status, `${kind === 'upload' ? 'PUT' : 'GET'} ${path} ${status}`) : new Error(String(e))
     } finally {
       stop()
     }

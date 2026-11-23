@@ -32,10 +32,46 @@ export async function readBytes(path: string): Promise<Uint8Array | null> {
   return v ?? null
 }
 
+type AndroidBridge = { writeChunk(path: string, b64: string, append: boolean): boolean; commitFile(path: string): boolean }
+const androidBridge = () => (window as unknown as { ReadlyAndroid?: Partial<AndroidBridge> }).ReadlyAndroid
+
+let dataDir: Promise<string> | null = null
+/** 分成 2MB 一块转成 base64（FileReader 不占主线程） */
+const toBase64 = (part: Uint8Array) =>
+  new Promise<string>((resolve, reject) => {
+    const r = new FileReader()
+    r.onload = () => resolve(String(r.result).slice(String(r.result).indexOf(',') + 1))
+    r.onerror = () => reject(r.error)
+    r.readAsDataURL(new Blob([part as BlobPart]))
+  })
+
+/**
+ * 安卓上写大文件：Tauri 把二进制传进原生层时会变成一长串数字的 JSON（几十 MB 的书要卡住界面十几秒），
+ * 所以分块交给 MainActivity 写，每块之间让出主线程。失败返回 false，退回原来的写法
+ */
+async function writeBigAndroid(path: string, data: Uint8Array): Promise<boolean> {
+  const bridge = androidBridge()
+  if (!bridge?.writeChunk || !bridge.commitFile) return false
+  try {
+    dataDir ??= import('@tauri-apps/api/path').then(p => p.appDataDir())
+    const abs = `${(await dataDir).replace(/\/+$/, '')}/${path}`
+    const CHUNK = 2 * 1024 * 1024
+    for (let i = 0; i < data.length; i += CHUNK) {
+      const b64 = await toBase64(data.subarray(i, Math.min(data.length, i + CHUNK)))
+      if (!bridge.writeChunk(abs, b64, i > 0)) return false
+    }
+    return bridge.commitFile(abs)
+  } catch (e) {
+    console.warn('分块写文件失败，改用普通写法', path, e)
+    return false
+  }
+}
+
 export async function writeBytes(path: string, data: Uint8Array) {
   if (isTauri) {
     const f = await fs()
     await ensureDir(path)
+    if (data.length > 1024 * 1024 && (await writeBigAndroid(path, data))) return
     await f.writeFile(path, data, { baseDir: f.BaseDirectory.AppData })
     return
   }

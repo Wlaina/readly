@@ -211,6 +211,40 @@ class MainActivity : TauriActivity() {
   }
 
   inner class Bridge {
+    /**
+     * 写大文件（书籍文件）：网页分块用 base64 传进来，追加写到 path.readly-part，最后 commitFile 换成正式文件。
+     * Tauri 在安卓上把二进制传进原生层时会变成一长串数字的 JSON，几十 MB 的书要卡住界面十几秒，所以绕开它。
+     * 只允许写本应用的私有目录
+     */
+    @JavascriptInterface
+    fun writeChunk(path: String, b64: String, append: Boolean): Boolean = try {
+      val f = privateFile("$path.readly-part")
+      f.parentFile?.mkdirs()
+      java.io.FileOutputStream(f, append).use { it.write(android.util.Base64.decode(b64, android.util.Base64.DEFAULT)) }
+      true
+    } catch (e: Exception) {
+      Log.w("Readly", "writeChunk failed", e)
+      false
+    }
+
+    @JavascriptInterface
+    fun commitFile(path: String): Boolean = try {
+      val part = privateFile("$path.readly-part")
+      val target = privateFile(path)
+      if (target.exists()) target.delete()
+      part.renameTo(target)
+    } catch (e: Exception) {
+      Log.w("Readly", "commitFile failed", e)
+      false
+    }
+
+    private fun privateFile(path: String): File {
+      val f = File(path).canonicalFile
+      val root = File(applicationInfo.dataDir).canonicalFile
+      require(f.path.startsWith(root.path + File.separator)) { "not a private file" }
+      return f
+    }
+
     /** 书源：用隐藏浏览器打开网页；完成后调用 window.__readlyBrowserDone(id)，再用 browserTake(id) 取结果 */
     @JavascriptInterface
     fun browserLoad(id: String, url: String, script: String, timeoutMs: Double, desktop: Boolean, action: String, images: Boolean, slot: Double) {

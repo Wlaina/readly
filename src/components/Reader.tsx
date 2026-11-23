@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import '../vendor/foliate-js/view.js'
 import { beforeLeave, useStore } from '../lib/store'
 import { openBook } from '../lib/book'
@@ -15,7 +15,7 @@ import { haptic, hasNativeBrightness, setImmersive, setKeepScreenOn, setNativeBr
 import { deviceClass } from '../lib/device'
 import type { Progress } from '../lib/types'
 import { AppearanceControls, BehaviorControls } from './ReadingControls'
-import TocPanel, { type TocItem } from './TocPanel'
+import TocPanel, { tocWidth, type TocItem } from './TocPanel'
 import { Segmented } from './ui'
 import Presence from './Presence'
 import {
@@ -529,8 +529,10 @@ function TocSheet({
   const marks = (rec?.bookmarks ?? []).filter(b => !b.deleted)
   const notes = (rec?.annotations ?? []).filter(a => !a.deleted)
   const totalMs = Object.values(rec?.readStats ?? {}).reduce((a, s) => a + s.ms, 0)
+  // 面板宽度跟着卷名、章名的长度走
+  const width = useMemo(() => tocWidth(toc), [toc])
   return (
-    <Sheet side onClose={onClose} pull={pull}>
+    <Sheet side className="toc-sheet" onClose={onClose} pull={pull} style={{ '--toc-w': `${width}px` } as React.CSSProperties}>
       <div className="toc-head">
         <div className="serif toc-title">{rec?.title}</div>
         <div className="toc-sub">{tr('已读 {time}', { time: formatDuration(totalMs) })}</div>

@@ -4,7 +4,7 @@ import { isProtected, protect, unprotect } from './secret'
 import type { Annotation, BookRecord, Bookmark, Category, CustomFont, Progress } from './types'
 import { DEFAULT_SETTINGS, mergeSettings, type Settings, type ShelfSort } from './settings'
 import { DEFAULT_SYNC, SyncEngine, type SyncConfig, type SyncMemo } from './sync'
-import { paths, readBytes, readJSON, removeFile, writeBytes, writeJSON } from './storage'
+import { isTauri, paths, readBytes, readJSON, removeFile, writeBytes, writeJSON } from './storage'
 import { openBook, parseImport } from './book'
 import { endTask, runTask, startTask, updateTask, useTasks } from './tasks'
 import { restoreEpubCover, setEpubCover, setEpubMetadata } from './epubedit'
@@ -355,6 +355,17 @@ export const useStore = create<State>((set, get) => {
           const cur = get().library.find(b => b.hash === rec.hash)
           if (cur?.folderRef && (cur.fileRev ?? 0) > (cur.fileRevLocal ?? 0))
             await writeBackToFolder(cur, bytes).catch(e => console.warn('写回书籍文件夹失败', e))
+        },
+        localBookPath: rec => (isTauri ? paths.book(rec.hash, rec.format) : null),
+        bookFileWritten: async rec => {
+          // 原生层下载好的书：读出来提取封面、写回书籍文件夹（读文件不会卡界面，写才会）
+          const cur = get().library.find(b => b.hash === rec.hash)
+          const needFolder = !!cur?.folderRef && (cur.fileRev ?? 0) > (cur.fileRevLocal ?? 0)
+          if (rec.format !== 'epub' && !needFolder) return
+          const bytes = await readBytes(paths.book(rec.hash, rec.format))
+          if (!bytes) return
+          if (rec.format === 'epub') void extractCover(rec.hash, rec.format, bytes)
+          if (cur && needFolder) await writeBackToFolder(cur, bytes).catch(e => console.warn('写回书籍文件夹失败', e))
         },
         importRemoteFile: async (name, bytes, remotePath) => {
           try {

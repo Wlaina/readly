@@ -286,6 +286,10 @@ input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 50%; }
 .sheet.pulled { animation: none !important; }
 /* 目录窄一点，右边多留出书页 */
 .sheet.side { width: min(320px, 80vw); }
+/* 目录：宽度按最长的卷名 / 章名（见 tocWidth），手机上最多占 92% 屏宽；还放不下的折成两行 */
+.sheet.side.toc-sheet { width: min(var(--toc-w, 320px), 92vw); max-width: none; }
+.toc-sheet .toc-label { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; }
+.toc-sheet .toc-item { align-items: center; }
 .toc-btn { touch-action: none; -webkit-touch-callout: none; }
 .toc-here { padding: 1px 7px; font-variant-numeric: tabular-nums; }
 
