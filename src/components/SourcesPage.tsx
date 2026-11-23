@@ -8,9 +8,10 @@ import { cancelDownload, downloadToShelf, fetchImage, pauseDownload, useDownload
 import { wenku8 } from '../lib/sources/wenku8'
 import { linovelib } from '../lib/sources/linovelib'
 import type { BookSource, SearchHit, SearchOutcome, SourceBook, SourceVolume } from '../lib/sources/types'
+import type { BookRecord } from '../lib/types'
 import { pushOverlay } from '../lib/overlay'
 import { loadCover, peekCover } from '../lib/covers'
-import { checkUpdates, crossRef, findShelfBook, planUpdate, sourceBooks, sourceOf, useUpdateCheck } from '../lib/sources/update'
+import { checkUpdates, crossRef, findShelfBook, planUpdate, sameBook, sourceBooks, sourceOf, useUpdateCheck } from '../lib/sources/update'
 import OnlineShelf from './OnlineShelf'
 import { openOnlineInReader } from '../lib/sources/onlinebook'
 import { toggleOnlineShelf, useOnShelf } from '../lib/sources/online'
@@ -104,6 +105,9 @@ export default function SourcesPage() {
   const library = useStore(s => s.library)
   const fromSources = sourceBooks(library)
   const withUpdates = fromSources.filter(b => b.source!.newVolumes || b.source!.newChapters)
+  const [showAll, setShowAll] = useState(false)
+  // 有更新的排前面；没更新的收起来，点“全部”再显示
+  const shownBooks = showAll ? [...withUpdates, ...fromSources.filter(b => !withUpdates.includes(b))] : withUpdates
   const checking = useUpdateCheck()
   // 第一次打开书库页时，顺手检查一下超过 12 小时没查过的书有没有更新
   useEffect(() => {
@@ -111,12 +115,49 @@ export default function SourcesPage() {
     return () => clearTimeout(t)
   }, [])
 
+  const showToast = useStore(s => s.showToast)
+  /** 换源途中要先输验证码 / 登录：搜到结果后自动接着完成切换 */
+  const pendingSwitch = useRef<{ rec: BookRecord; other: BookSource } | null>(null)
+  const [switching, setSwitching] = useState<string | null>(null)
+
   const show = (r: SearchOutcome) => {
     if ('captcha' in r) {
       setCode('')
       setView({ kind: 'captcha', image: r.captcha })
     } else if ('needLogin' in r) setView({ kind: 'login' })
-    else setView({ kind: 'hits', hits: r.hits })
+    else {
+      const pend = pendingSwitch.current
+      pendingSwitch.current = null
+      if (!pend) return setView({ kind: 'hits', hits: r.hits })
+      setView({ kind: 'loading' })
+      completeSwitch(pend.rec, pend.other, r.hits)
+        .then(ok => setView(ok ? { kind: 'idle' } : { kind: 'hits', hits: r.hits }))
+        .catch(e => setView({ kind: 'error', message: errText(e) }))
+    }
+  }
+
+  /** 换源的最后一步：在搜索结果里认出这本书，书架记录改成新书源并马上检查更新；认不出返回 false */
+  const completeSwitch = async (rec: BookRecord, other: BookSource, hits: SearchHit[]) => {
+    const hit = hits.find(h => h.source === other.id && sameBook(h, rec))
+    if (!hit) return false
+    const vols = await other.getVolumes(hit.id)
+    const cur = useStore.getState().library.find(b => b.hash === rec.hash)
+    if (!cur?.source) return true
+    const ref = crossRef(cur.source, cur.title, other.id, hit.id, vols, hit.title)
+    const plan = planUpdate(ref, vols)
+    useStore.getState().setBookSource(cur.hash, {
+      ...ref,
+      checkedAt: Date.now(),
+      newVolumes: plan.newVolumes.length,
+      newChapters: plan.toLast.length,
+    })
+    const name = tr(other.name)
+    showToast(
+      plan.newVolumes.length
+        ? tr('《{title}》已改从{name}追更：新出 {n} 卷', { title: cur.title, name, n: plan.newVolumes.length })
+        : tr('《{title}》已改从{name}追更，已是最新', { title: cur.title, name }),
+    )
+    return true
   }
 
   const run = async (fn: (signal: AbortSignal) => Promise<SearchOutcome>) => {
@@ -143,6 +184,31 @@ export default function SourcesPage() {
     busy.current = null
     cancelBrowser()
     setView({ kind: 'idle' })
+  }
+
+  /**
+   * 一键换源：在另一个书源上按书名找到这本书，以后改从那里追更，并马上检查一次更新。
+   * 要验证码 / 登录、或认不出是哪一本时，转到搜索区接着处理
+   */
+  const switchSource = async (rec: BookRecord) => {
+    const other = SOURCES.find(x => x.id !== rec.source?.kind)
+    if (!other || switching) return
+    setSwitching(rec.hash)
+    try {
+      const r = await other.search(rec.title)
+      if ('hits' in r && (await completeSwitch(rec, other, r.hits))) return
+      pendingSwitch.current = 'hits' in r ? null : { rec, other }
+      pickPane('find')
+      setSourceId(other.id)
+      setQ(rec.title)
+      show(r)
+      if ('hits' in r) showToast(tr('在{name}没认出这本书，请在搜索结果里点开它', { name: tr(other.name) }))
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+    } catch (e) {
+      showToast(tr('换源失败：{e}', { e: errText(e) }))
+    } finally {
+      setSwitching(null)
+    }
   }
 
   const search = () => {
@@ -199,6 +265,8 @@ export default function SourcesPage() {
                 className="src-search"
                 onSubmit={e => {
                   e.preventDefault()
+                  // 自己重新搜了：不再接着做之前的换源（登录后自动重搜时保留）
+                  pendingSwitch.current = null
                   search()
                 }}
               >
@@ -272,26 +340,45 @@ export default function SourcesPage() {
                       : tr('检查更新')}
                   </button>
                 </div>
-                {withUpdates.map(b => (
-                  <button key={b.hash} className="src-upd" onClick={() => openSheet({ source: b.source!.kind, id: b.source!.id })}>
-                    <ShelfCover hash={b.hash} title={b.title} />
-                    <div className="src-upd-text">
-                      <span className="serif">{b.title}</span>
-                      <span className="new">
-                        {[
-                          b.source!.newVolumes && tr('新出 {n} 卷', { n: b.source!.newVolumes }),
-                          b.source!.newChapters &&
-                            tr('最后一卷新增 {n} 章', {
-                              n: b.source!.newChapters,
-                            }),
-                        ]
-                          .filter(Boolean)
-                          .join('，')}
-                      </span>
-                      <span className="muted">{tr('点开后可以追加到书架，进度和书签都保留')}</span>
+                {shownBooks.map(b => {
+                  const upd = !!(b.source!.newVolumes || b.source!.newChapters)
+                  const from = SOURCES.find(x => x.id === b.source!.kind)
+                  const other = SOURCES.find(x => x.id !== b.source!.kind)
+                  return (
+                    <div key={b.hash} className="src-upd">
+                      <button className="src-upd-main" onClick={() => openSheet({ source: b.source!.kind, id: b.source!.id })}>
+                        <ShelfCover hash={b.hash} title={b.title} />
+                        <div className="src-upd-text">
+                          <span className="serif">{b.title}</span>
+                          {upd && (
+                            <span className="new">
+                              {[
+                                b.source!.newVolumes && tr('新出 {n} 卷', { n: b.source!.newVolumes }),
+                                b.source!.newChapters && tr('最后一卷新增 {n} 章', { n: b.source!.newChapters }),
+                              ]
+                                .filter(Boolean)
+                                .join('，')}
+                            </span>
+                          )}
+                          <span className="muted">
+                            {tr('从{name}追更', { name: from ? tr(from.name) : b.source!.kind })}
+                            {upd ? tr(' · 点开可以追加，进度和书签都保留') : ''}
+                          </span>
+                        </div>
+                      </button>
+                      {other && (
+                        <button className="btn ghost src-upd-switch" disabled={!!switching} onClick={() => switchSource(b)}>
+                          {switching === b.hash ? tr('切换中…') : tr('换到{name}', { name: tr(other.name) })}
+                        </button>
+                      )}
                     </div>
+                  )
+                })}
+                {fromSources.length > withUpdates.length && (
+                  <button className="btn ghost src-upd-more" onClick={() => setShowAll(v => !v)}>
+                    {showAll ? tr('收起') : tr('全部 {n} 本（换书源追更）', { n: fromSources.length })}
                   </button>
-                ))}
+                )}
               </div>
             )}
 
@@ -438,13 +525,6 @@ function BookSheet({ source, id, onClose }: { source: BookSource; id: string; on
     )
   }
 
-  /** 换书源：以后从这个书源检查更新（不下载） */
-  const follow = () => {
-    if (!shelf?.source || !book || !vols || !cross) return
-    useStore.getState().setBookSource(shelf.hash, crossRef(shelf.source, shelf.title, source.id, id, vols, book.title))
-    showToast(tr('《{title}》以后从{name}检查更新', { title: shelf.title, name: source.name }))
-  }
-
   return (
     <>
       <div className="scrim dim book-sheet-scrim" onClick={onClose} />
@@ -495,11 +575,7 @@ function BookSheet({ source, id, onClose }: { source: BookSource; id: string; on
                       name: source.name,
                     })
                   : tr('书架上已有这本书（《{title}》）。新的内容会追加到它的末尾，阅读进度、书签和笔记都保留。', { title: shelf.title })}
-                {cross && (
-                  <button className="btn ghost src-follow" onClick={follow}>
-                    {tr('只改从{name}检查更新', { name: source.name })}
-                  </button>
-                )}
+
                 {!!toLast.length && (
                   <b>
                     {tr('最后一卷新出了 {n} 章，会一起追加。', {

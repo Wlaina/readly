@@ -61,7 +61,10 @@
 .src-vols .cat-row.locked { opacity: .55; cursor: default; }
 .src-updates { display: flex; flex-direction: column; gap: 8px; }
 .src-updates-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.src-upd { display: flex; align-items: center; gap: 12px; padding: 8px; border-radius: 12px; text-align: left; width: 100%; }
+.src-upd { display: flex; align-items: center; gap: 8px; border-radius: 12px; width: 100%; }
+.src-upd-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 8px; border-radius: 12px; text-align: left; background: none; border: 0; color: inherit; font: inherit; cursor: pointer; }
+.src-upd-switch { flex: none; height: 32px; padding: 0 12px; font-size: 13px; }
+.src-upd-more { align-self: center; height: 30px; font-size: 13px; }
 .src-upd .src-cover { width: 44px; }
 .src-upd-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .src-upd-text .serif { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -70,4 +73,3 @@
 
 .src-pane-seg { align-self: flex-end; font-size: 13.5px; }
 .src-actions { margin-top: 12px; flex-wrap: wrap; gap: 8px; }
-.src-merge-note .src-follow { display: inline-flex; margin-top: 6px; height: 30px; padding: 0 12px; font-size: 13px; }
