@@ -848,4 +848,8 @@ export const EN: Record<string, string | ((v: V) => string)> = {
   '删掉了 {n} 个重复的卷': 'removed {n} duplicate volumes',
   '统一了 {n} 个卷名': 'renamed {n} volumes',
   '《{title}》已整理：{list}': 'Tidied “{title}”: {list}',
+  '开头': 'Opening pages',
+  '其他图片': 'Other images',
+  '缩放': 'Zoom',
+  '拖动选位置，滚轮、双指或滑块缩放': 'Drag to position; scroll, pinch or use the slider to zoom',
 }

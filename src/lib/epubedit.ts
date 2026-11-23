@@ -117,17 +117,81 @@ function repack(files: Record<string, Uint8Array>): Uint8Array {
   return zipSync(zip)
 }
 
-/** 书里的图片（按目录文件里的顺序），换封面时可以从中挑 */
-export function epubImages(bytes: Uint8Array): { path: string; type: string; bytes: Uint8Array; isCover: boolean }[] {
+/**
+ * 目录里的“卷”：顶层目录项下面还有子目录（第一卷 → 各章）时，顶层项就是卷。
+ * 返回每卷的标题和它在书里开始的文件；目录只有一层（单卷书）时返回空
+ */
+function tocVolumes(o: ReturnType<typeof openOpf>): { title: string; path: string }[] {
+  const at = (base: string, href: string) => decodeURIComponent(new URL(href, `http://x/${base}`).pathname.slice(1))
+  const clean = (t: string | null | undefined) => (t ?? '').replace(/\s+/g, ' ').trim()
+  const out: { title: string; path: string; nested: boolean }[] = []
+  // EPUB 3：nav.xhtml
+  const navItem = o.items.find(i => (i.getAttribute('properties') ?? '').split(/\s+/).includes('nav'))
+  const navPath = navItem && o.resolve(navItem.getAttribute('href') ?? '')
+  if (navPath && o.files[navPath]) {
+    const doc = new DOMParser().parseFromString(strFromU8(o.files[navPath]), 'application/xhtml+xml')
+    const navs = Array.from(doc.getElementsByTagNameNS('*', 'nav'))
+    const nav = navs.find(n => /toc/.test(n.getAttribute('epub:type') ?? n.getAttributeNS('http://www.idpf.org/2007/ops', 'type') ?? '')) ?? navs[0]
+    const ol = nav && Array.from(nav.children).find(c => c.localName === 'ol')
+    for (const li of ol ? Array.from(ol.children).filter(c => c.localName === 'li') : []) {
+      const a = Array.from(li.children).find(c => c.localName === 'a' || c.localName === 'span')
+      const first = li.getElementsByTagNameNS('*', 'a')[0]
+      const href = first?.getAttribute('href')
+      if (!href) continue
+      out.push({ title: clean(a?.textContent), path: at(navPath, href.split('#')[0]), nested: !!Array.from(li.children).find(c => c.localName === 'ol') })
+    }
+  } else {
+    // EPUB 2：toc.ncx
+    const ncxItem = o.items.find(i => /ncx/.test(i.getAttribute('media-type') ?? ''))
+    const ncxPath = ncxItem && o.resolve(ncxItem.getAttribute('href') ?? '')
+    if (ncxPath && o.files[ncxPath]) {
+      const doc = new DOMParser().parseFromString(strFromU8(o.files[ncxPath]), 'application/xml')
+      const map = doc.getElementsByTagNameNS('*', 'navMap')[0]
+      for (const np of map ? Array.from(map.children).filter(c => c.localName === 'navPoint') : []) {
+        const src = np.getElementsByTagNameNS('*', 'content')[0]?.getAttribute('src')
+        if (!src) continue
+        const label = Array.from(np.children).find(c => c.localName === 'navLabel')?.textContent
+        out.push({ title: clean(label), path: at(ncxPath, src.split('#')[0]), nested: Array.from(np.children).some(c => c.localName === 'navPoint') })
+      }
+    }
+  }
+  return out.filter(v => v.nested).length >= 2 ? out : []
+}
+
+/**
+ * 书里的图片，按在正文里出现的先后排；能分出卷的书（目录有两层）记上每张图所在的卷，换封面时按卷分组。
+ * 正文里没用到的图片排在最后（group 为 null）
+ */
+export function epubImages(bytes: Uint8Array): { path: string; type: string; bytes: Uint8Array; isCover: boolean; group: string | null }[] {
   const o = openOpf(bytes)
   const cover = coverItem(o.doc, o.items)
-  return o.items
+  const images = o.items
     .filter(i => /^image\/(jpeg|png|gif|webp)/.test(i.getAttribute('media-type') ?? ''))
     .map(i => {
       const path = o.resolve(i.getAttribute('href') ?? '')
-      return { path, type: i.getAttribute('media-type')!, bytes: o.files[path], isCover: i === cover }
+      return { path, type: i.getAttribute('media-type')!, bytes: o.files[path], isCover: i === cover, group: null as string | null }
     })
     .filter(i => i.bytes?.length)
+  const byPath = new Map(images.map(i => [i.path, i]))
+  const vols = tocVolumes(o)
+  const volAt = new Map(vols.map(v => [v.path, v.title]))
+  const byId = new Map(o.items.map(i => [i.getAttribute('id') ?? '', i]))
+  const order: typeof images = []
+  let group = vols.length ? tr('开头') : ''
+  for (const ref of Array.from(o.doc.getElementsByTagNameNS('*', 'itemref'))) {
+    const item = byId.get(ref.getAttribute('idref') ?? '')
+    if (!item) continue
+    const page = o.resolve(item.getAttribute('href') ?? '')
+    if (volAt.has(page)) group = volAt.get(page)!
+    const html = o.files[page] && /x?html/.test(item.getAttribute('media-type') ?? '') ? strFromU8(o.files[page]) : ''
+    for (const m of html.matchAll(/<(?:img|image)\b[^>]*?\s(?:src|xlink:href|href)\s*=\s*["']([^"']+)["']/gi)) {
+      const img = byPath.get(decodeURIComponent(new URL(m[1], `http://x/${page}`).pathname.slice(1)))
+      if (!img || order.includes(img)) continue
+      img.group = group
+      order.push(img)
+    }
+  }
+  return [...order, ...images.filter(i => !order.includes(i))]
 }
 
 /** 封面是不是换过（能不能恢复） */

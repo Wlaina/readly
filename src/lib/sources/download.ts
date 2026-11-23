@@ -65,7 +65,7 @@ export async function asCover(img: EpubImage): Promise<EpubImage | null> {
  * 找出这些竖线，取宽高比最像封面（高约为宽的 1.42 倍）的一段，差不多时取靠左的。
  * 找不到就退回从最左边裁一个封面宽度
  */
-function frontCoverSpan(bmp: ImageBitmap): [number, number] {
+export function frontCoverSpan(bmp: ImageBitmap): [number, number] {
   const { width: w, height: h } = bmp
   const fallback: [number, number] = [0, Math.min(w, Math.round(h / 1.42))]
   const ctx = new OffscreenCanvas(w, h).getContext('2d', { willReadFrequently: true })

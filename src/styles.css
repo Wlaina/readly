@@ -1009,6 +1009,21 @@ kbd {
   color: var(--muted); border: 1.5px dashed var(--border-strong); box-shadow: none;
 }
 .cover-compare figcaption { font-size: 12.5px; color: var(--muted); }
+.cover-compare figure.cropping { width: auto; }
+.cover-compare figure.cropping figcaption { max-width: 200px; text-align: center; }
+.cover-cropper { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.cover-crop-box { position: relative; overflow: hidden; border-radius: 10px; box-shadow: var(--shadow-sm); cursor: grab; touch-action: none; user-select: none; background: var(--surface-2, #0002); }
+.cover-crop-box:active { cursor: grabbing; }
+.cover-crop-box img { position: absolute; left: 0; top: 0; max-width: none; transform-origin: 0 0; pointer-events: none; }
+.cover-zoom { width: 200px; accent-color: var(--brand); }
+.cover-groups { max-height: 300px; overflow-y: auto; padding: 2px; }
+.cover-group-title { position: sticky; top: 0; z-index: 1; margin: 0; padding: 8px 2px 6px; font-size: 13px; font-weight: 600; color: var(--text-2); background: var(--surface); }
+.cover-groups .cover-grid { max-height: none; overflow: visible; }
+@media (max-width: 420px) {
+  .cover-compare { gap: 8px; }
+  .cover-compare figure:first-child { width: 72px; }
+  .cover-compare figure:first-child > img, .cover-compare figure:first-child > .cover { width: 72px; }
+}
 .cover-arrow { font-size: 20px; color: var(--muted); }
 .cover-crop { display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 13px; color: var(--text-2); margin-bottom: 6px; }
 .cover-pick-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 12px 0 8px; font-size: 13px; color: var(--text-2); }
