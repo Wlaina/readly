@@ -110,7 +110,8 @@ class Writer {
           name = img ? this.addImage(img) : ''
           this.imageNames.set(b.src, name)
         }
-        body.push(name ? `<div class="illus"><img src="${name}" alt=""/></div>` : `<p class="blank">[插图]</p>`)
+        // 没下载到的图记下原地址，以后“补全插图”时直接用
+        body.push(name ? `<div class="illus"><img src="${name}" alt=""/></div>` : `<p class="blank" data-src="${esc(b.src)}">[插图]</p>`)
       }
     }
     this.files[`OEBPS/${f}`] = strToU8(page(ch.title, body.join('\n')))
@@ -372,4 +373,71 @@ export function editVolumes(
     return Math.max(0, newOrder.length - 1)
   })
   return { bytes: zip(files), remap }
+}
+
+/* ---------- 补全插图 ---------- */
+
+/** 一章里所有插图的位置：已有的图和没下载到的“[插图]”占位，按出现的先后 */
+const SLOT = /<div class="illus"><img src="[^"]*" alt=""\/><\/div>|<p class="blank"(?: data-src="([^"]*)")?>\[插图\]<\/p>/g
+
+export interface MissingChapter {
+  /** 章节文件，例如 OEBPS/v002c0001.xhtml */
+  file: string
+  title: string
+  /** 这一章一共有几个插图位置 */
+  slots: number
+  /** 没下载到的位置（第几个插图位置）和记下的原地址（旧版本下载的书没有） */
+  blanks: { index: number; src?: string }[]
+}
+
+const unesc = (s: string) => s.replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
+
+/** 找出书里没下载到的插图（只看书库下载的书写出的章节文件） */
+export function missingImages(bytes: Uint8Array): MissingChapter[] {
+  const files = unzipSync(bytes, { filter: f => /^OEBPS\/v\d{3}c\d{4}\.xhtml$/.test(f.name) })
+  const out: MissingChapter[] = []
+  for (const name of Object.keys(files).sort()) {
+    const text = strFromU8(files[name])
+    if (!text.includes('[插图]')) continue
+    const blanks: MissingChapter['blanks'] = []
+    let k = 0
+    for (const m of text.matchAll(SLOT)) {
+      if (m[0].startsWith('<p')) blanks.push({ index: k, src: m[1] ? unesc(m[1]) : undefined })
+      k++
+    }
+    if (blanks.length) out.push({ file: name, title: unesc(text.match(/<title>([^<]*)<\/title>/)?.[1] ?? ''), slots: k, blanks })
+  }
+  return out
+}
+
+/**
+ * 把补下载的插图放回书里：fills 是 章节文件 → (第几个插图位置 → 图片)。
+ * 返回新的 EPUB 和补上的张数；书里原有的内容、文件名、阅读顺序都不变（进度、书签不受影响）
+ */
+export function fillImages(bytes: Uint8Array, fills: Map<string, Map<number, EpubImage>>): { bytes: Uint8Array; filled: number } {
+  const files = unzipSync(bytes)
+  delete files.mimetype
+  let seq = Math.max(0, ...Object.keys(files).map(n => Number(n.match(/^OEBPS\/images\/img(\d+)\./)?.[1] ?? 0)))
+  const items: string[] = []
+  let filled = 0
+  for (const [file, byIndex] of fills) {
+    if (!files[file] || !byIndex.size) continue
+    let k = 0
+    const text = strFromU8(files[file]).replace(SLOT, m => {
+      const i = k++
+      const img = m.startsWith('<p') ? byIndex.get(i) : undefined
+      const t = img && imageType(img.bytes)
+      if (!img || !t) return m
+      const name = `images/img${pad(++seq, 4)}.${t.ext}`
+      files[`OEBPS/${name}`] = img.bytes
+      items.push(`<item id="${name.replace(/[/.]/g, '_')}" href="${name}" media-type="${t.mime}"/>`)
+      filled++
+      return `<div class="illus"><img src="${name}" alt=""/></div>`
+    })
+    files[file] = strToU8(text)
+  }
+  if (!filled) return { bytes, filled }
+  const opf = strFromU8(files['OEBPS/content.opf'])
+  files['OEBPS/content.opf'] = strToU8(opf.replace('</manifest>', `${items.join('\n')}\n</manifest>`))
+  return { bytes: zip(files), filled }
 }

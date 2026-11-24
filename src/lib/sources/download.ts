@@ -11,26 +11,57 @@ import { useStore } from '../store'
 import { setKeepScreenOn } from '../native'
 import { tr } from '../i18n'
 import { BROWSER_SLOTS, cancelBrowser } from './browser'
-import { appendEpub, buildEpub, editVolumes, imageType, readManifest, type EpubImage, type EpubVolume, type SourceManifest } from './epub'
+import { appendEpub, buildEpub, editVolumes, fillImages, imageType, missingImages, readManifest, type EpubImage, type EpubVolume, type SourceManifest } from './epub'
 import type { BookSource, ChapterContent, SourceBook, SourceChapter, SourceVolume } from './types'
 import type { BookRecord, SourceRef } from '../types'
-import { matchVolumes, styleVolTitle, tidyPlan, volStyle } from './update'
+import { matchVolumes, sourceOf, styleVolTitle, tidyPlan, volStyle } from './update'
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 const aborted = () => new DOMException('cancelled', 'AbortError')
 
-export async function fetchImage(url: string, referer: string): Promise<EpubImage | null> {
+/**
+ * 图床限速：哔哩的图片服务器连续快速请求约 12 次后回 429，停 5 秒左右恢复（2026-11 实测）；
+ * 一张一张、每张间隔 0.7 秒下载就不会被拒。按图片所在的站点排队，几个下载线程共用同一个节奏
+ */
+const PACED = /readpai\.com|linovelib\.com|bilinovel\.com/
+const IMG_GAP = 700
+const nextSlot = new Map<string, number>()
+async function pace(url: string) {
+  if (!PACED.test(url)) return
+  const host = new URL(url).host
+  const now = Date.now()
+  const slot = Math.max(now, nextSlot.get(host) ?? 0)
+  nextSlot.set(host, slot + IMG_GAP)
+  if (slot > now) await sleep(slot - now)
+}
+/** 被限速了：这个站点的所有图片都等一会儿再下 */
+function backoff(url: string, ms: number) {
+  if (!PACED.test(url)) return
+  const host = new URL(url).host
+  nextSlot.set(host, Math.max(nextSlot.get(host) ?? 0, Date.now() + ms))
+}
+
+export async function fetchImage(url: string, referer: string, signal?: AbortSignal): Promise<EpubImage | null> {
   if (!url) return null
   // 哔哩的封面有时放在姊妹站 bilinovel 上，防盗链要按图片所在的站点来
   const ref = /bilinovel\./.test(url) ? 'https://www.bilinovel.com/' : referer
-  try {
-    const buf = await invoke<ArrayBuffer>('fetch_image', { url, referer: ref })
-    const bytes = new Uint8Array(buf)
-    const t = imageType(bytes)
-    return t ? { bytes, type: t.mime } : null
-  } catch (e) {
-    console.warn('图片下载失败', url, e)
-    return null
+  for (let attempt = 0; ; attempt++) {
+    if (signal?.aborted) return null
+    await pace(url)
+    try {
+      const buf = await invoke<ArrayBuffer>('fetch_image', { url, referer: ref })
+      const bytes = new Uint8Array(buf)
+      const t = imageType(bytes)
+      return t ? { bytes, type: t.mime } : null
+    } catch (e) {
+      // 被限速 / 服务器忙：等一会儿再试（最多 6 次），不要直接放弃变成“[插图]”
+      if (/HTTP (429|503)|timed? ?out|超时/i.test(String(e)) && attempt < 6) {
+        backoff(url, 4000 * (attempt + 1))
+        continue
+      }
+      console.warn('图片下载失败', url, e)
+      return null
+    }
   }
 }
 
@@ -301,7 +332,7 @@ export async function downloadToShelf(
       Array.from({ length: 4 }, async () => {
         while (i < srcs.length && !signal.aborted) {
           const url = srcs[i++]
-          const img = await fetchImage(url, src.referer)
+          const img = await fetchImage(url, src.referer, signal)
           if (img) images.set(url, img)
         }
       }),
@@ -505,4 +536,77 @@ export async function tidyBook(hash: string, remote?: { vols: SourceVolume[]; ti
     plan.rename.size && tr('统一了 {n} 个卷名', { n: plan.rename.size }),
   ].filter(Boolean)
   store.showToast(tr('《{title}》已整理：{list}', { title: cur.title, list: parts.join('，') }))
+}
+
+/**
+ * 补全一本书里没下载到的插图（以前下载时被图床限速漏掉的）：重新打开缺图的章节拿到图片地址，
+ * 按顺序补回原来的位置。改的是书籍文件本身，写回书籍文件夹并同步到其他设备；阅读位置不受影响。
+ * 章节里的插图数量和网站上对不上时（例如换过书源的卷）跳过那一章，不冒险放错位置
+ */
+export async function repairImages(hash: string) {
+  const store = useStore.getState()
+  const cur = store.library.find(b => b.hash === hash && !b.deletedAt)
+  if (!cur) return
+  const bytes = await store.loadBookFile(cur)
+  const manifest = readManifest(bytes)
+  const src = manifest ? sourceOf(manifest.source) : undefined
+  if (!manifest || !src) throw new Error(tr('这本书不是从书库下载的'))
+  const chapters = missingImages(bytes)
+  const total = chapters.reduce((n, c) => n + c.blanks.length, 0)
+  if (!total) {
+    store.showToast(tr('《{title}》没有缺的插图', { title: cur.title }))
+    return
+  }
+  const tid = startTask('download', tr('补全插图《{title}》', { title: cur.title }), { total, loaded: 0 })
+  const fills = new Map<string, Map<number, EpubImage>>()
+  let done = 0
+  let skipped = 0
+  try {
+    for (const ch of chapters) {
+      let urls: string[] | null = null
+      if (ch.blanks.some(b => !b.src)) {
+        // 旧书没记原地址：按章节文件名找到这一章，重新打开网页拿图片地址
+        const m = ch.file.match(/v(\d{3})c(\d{4})\.xhtml$/)
+        const vi = Number(m?.[1]) - 1
+        const ci = Number(m?.[2]) - 1
+        const vol = manifest.volumes.find((v, i) => (v.file ?? i) === vi)
+        const cid = vol?.chapters[ci]
+        if (cid && !cid.startsWith('broken')) {
+          const url = src.id === 'linovelib' ? `${src.home}/novel/${manifest.id}/${cid}.html` : ''
+          const content = await src.getChapter(manifest.id, { id: cid, title: ch.title, url }).catch(e => {
+            console.warn('补全插图：打不开章节', ch.title, e)
+            return null
+          })
+          const found = content?.blocks.flatMap(b => (b.type === 'img' ? [b.src] : [])) ?? []
+          if (found.length === ch.slots) urls = found
+          else console.warn('补全插图：插图数量对不上，跳过', ch.title, found.length, ch.slots)
+        }
+      }
+      const byIndex = new Map<number, EpubImage>()
+      for (const b of ch.blanks) {
+        const url = b.src ?? urls?.[b.index]
+        const img = url ? await fetchImage(url, src.referer) : null
+        if (img) byIndex.set(b.index, img)
+        else skipped++
+        updateTask(tid, { loaded: ++done })
+      }
+      if (byIndex.size) fills.set(ch.file, byIndex)
+    }
+    const { bytes: out, filled } = fillImages(bytes, fills)
+    if (filled) {
+      await store.updateBookFile(hash, out, cur.fileName || `${cur.title}.epub`)
+      await store.writeBookToFolder(hash, out)
+    }
+    endTask(tid)
+    store.showToast(
+      filled
+        ? skipped
+          ? tr('《{title}》补上了 {n} 张插图，还有 {m} 张没找到', { title: cur.title, n: filled, m: skipped })
+          : tr('《{title}》补上了 {n} 张插图', { title: cur.title, n: filled })
+        : tr('《{title}》的插图没能补上，请稍后再试', { title: cur.title }),
+    )
+  } catch (e) {
+    endTask(tid, e)
+    throw e
+  }
 }

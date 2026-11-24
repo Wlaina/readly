@@ -348,6 +348,20 @@ export default function Library() {
             {tr('更换封面')}
           </button>
         )}
+        {rec.format === 'epub' && rec.hasFile && rec.source && (
+          <button
+            onClick={() =>
+              run(() =>
+                import('../lib/sources/download')
+                  .then(m => m.repairImages(rec.hash))
+                  .catch(e => useStore.getState().showToast(tr('补全插图失败：{e}', { e: e instanceof Error ? e.message : String(e) }))),
+              )
+            }
+          >
+            <IconDownload />
+            {tr('补全插图')}
+          </button>
+        )}
         {catsOn && (
           <button onClick={() => run(() => openAssign([rec.hash]))}>
             <IconTag />
