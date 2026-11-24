@@ -441,3 +441,40 @@ export function fillImages(bytes: Uint8Array, fills: Map<string, Map<number, Epu
   files['OEBPS/content.opf'] = strToU8(opf.replace('</manifest>', `${items.join('\n')}\n</manifest>`))
   return { bytes: zip(files), filled }
 }
+
+/**
+ * 删掉书里没有任何章节用到的插图（例如“整理这本书”删掉重复的卷之后，那一卷的插图还留在书里）。
+ * 封面图（OPF 里标成封面的）和换封面时备份的原封面不动。只用于书库下载的书（OEBPS 下的结构是 Readly 自己写的）。
+ * 返回新的 EPUB 和删掉的张数
+ */
+export function pruneImages(bytes: Uint8Array): { bytes: Uint8Array; removed: number } {
+  const files = unzipSync(bytes)
+  const opfName = 'OEBPS/content.opf'
+  if (!files[opfName]) return { bytes, removed: 0 }
+  const used = new Set<string>()
+  for (const [name, data] of Object.entries(files)) {
+    if (!/\.x?html?$/i.test(name)) continue
+    const dir = name.slice(0, name.lastIndexOf('/') + 1)
+    for (const m of strFromU8(data).matchAll(/(?:src|xlink:href|href)\s*=\s*"([^"#?]+\.(?:jpe?g|png|gif|webp))"/gi)) {
+      used.add(decodeURIComponent(new URL(m[1], `http://x/${dir}`).pathname.slice(1)))
+    }
+  }
+  let opf = strFromU8(files[opfName])
+  const coverId = opf.match(/<meta\s+name="cover"\s+content="([^"]+)"/)?.[1]
+  let removed = 0
+  opf = opf.replace(/[ \t]*<item\b[^>]*\/>\r?\n?/g, item => {
+    const href = item.match(/\bhref="([^"]+)"/)?.[1]
+    const type = item.match(/\bmedia-type="([^"]+)"/)?.[1] ?? ''
+    const id = item.match(/\bid="([^"]+)"/)?.[1]
+    if (!href || !type.startsWith('image/') || /cover-image/.test(item) || (coverId && id === coverId)) return item
+    const path = decodeURIComponent(new URL(href, 'http://x/OEBPS/').pathname.slice(1))
+    if (used.has(path)) return item
+    delete files[path]
+    removed++
+    return ''
+  })
+  if (!removed) return { bytes, removed }
+  files[opfName] = strToU8(opf)
+  delete files.mimetype
+  return { bytes: zip(files), removed }
+}

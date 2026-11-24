@@ -11,7 +11,7 @@ import { useStore } from '../store'
 import { setKeepScreenOn } from '../native'
 import { tr } from '../i18n'
 import { BROWSER_SLOTS, cancelBrowser } from './browser'
-import { appendEpub, buildEpub, editVolumes, fillImages, imageType, missingImages, readManifest, type EpubImage, type EpubVolume, type SourceManifest } from './epub'
+import { appendEpub, buildEpub, editVolumes, fillImages, imageType, missingImages, pruneImages, readManifest, type EpubImage, type EpubVolume, type SourceManifest } from './epub'
 import type { BookSource, ChapterContent, SourceBook, SourceChapter, SourceVolume } from './types'
 import type { BookRecord, SourceRef } from '../types'
 import { matchVolumes, sourceOf, styleVolTitle, tidyPlan, volStyle } from './update'
@@ -519,7 +519,7 @@ export async function tidyBook(hash: string, remote?: { vols: SourceVolume[]; ti
       ]
     }),
   }
-  const { bytes, remap } = editVolumes(
+  const edited = editVolumes(
     old,
     {
       remove: plan.remove.map(i => vols[i].file),
@@ -527,6 +527,9 @@ export async function tidyBook(hash: string, remote?: { vols: SourceVolume[]; ti
     },
     manifest,
   )
+  const { remap } = edited
+  // 删掉的卷里的插图不会再被用到：一起删掉，不占地方，换封面时也不会出现在“其他图片”里
+  const { bytes } = pruneImages(edited.bytes)
   if (remap.some((n, i) => n !== i)) store.remapBookPositions(hash, remap)
   await store.updateBookFile(hash, bytes, cur.fileName || `${cur.title}.epub`)
   await store.writeBookToFolder(hash, bytes)
@@ -554,7 +557,13 @@ export async function repairImages(hash: string) {
   const chapters = missingImages(bytes)
   const total = chapters.reduce((n, c) => n + c.blanks.length, 0)
   if (!total) {
-    store.showToast(tr('《{title}》没有缺的插图', { title: cur.title }))
+    // 顺手清理没有章节用到的插图（以前“整理这本书”删卷后留下的）
+    const pruned = pruneImages(bytes)
+    if (pruned.removed) {
+      await store.updateBookFile(hash, pruned.bytes, cur.fileName || `${cur.title}.epub`)
+      await store.writeBookToFolder(hash, pruned.bytes)
+      store.showToast(tr('《{title}》没有缺的插图，清理了 {n} 张多余的图片', { title: cur.title, n: pruned.removed }))
+    } else store.showToast(tr('《{title}》没有缺的插图', { title: cur.title }))
     return
   }
   const tid = startTask('download', tr('补全插图《{title}》', { title: cur.title }), { total, loaded: 0 })
@@ -606,8 +615,12 @@ export async function repairImages(hash: string) {
       }
       if (byIndex.size) fills.set(ch.file, byIndex)
     }
-    const { bytes: out, filled } = fillImages(bytes, fills)
-    if (filled) {
+    const filledBook = fillImages(bytes, fills)
+    const filled = filledBook.filled
+    // 顺手清理没有章节用到的插图（以前“整理这本书”删卷后留下的）
+    const pruned = pruneImages(filledBook.bytes)
+    const out = pruned.bytes
+    if (filled || pruned.removed) {
       await store.updateBookFile(hash, out, cur.fileName || `${cur.title}.epub`)
       await store.writeBookToFolder(hash, out)
     }
