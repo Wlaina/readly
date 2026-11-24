@@ -637,6 +637,14 @@ export class SyncEngine {
     lib = fresh()
     await pool(downloads, 3, async rec => {
       rec = cur(rec)
+      if (od && rec.hasFile && rec.fileQx) {
+        const mine = await this.hooks.bookQuickXor?.(rec).catch(() => '')
+        if (mine === rec.fileQx) {
+          const now = this.hooks.getLibrary().find(b => b.hash === rec.hash)
+          if (now) this.hooks.saveBooks([{ ...now, fileRevLocal: now.fileRev ?? 0 }])
+          return
+        }
+      }
       let from: string | undefined
       if (od && rec.cloudPath) {
         // 书在 OneDrive 的书籍文件夹里：先核对那里的文件是不是记录里说的版本（电脑上的 OneDrive 客户端可能还没传完）
@@ -689,7 +697,12 @@ export class SyncEngine {
         }
         continue
       }
-      const qx = rec.fileQx || (await this.hooks.bookQuickXor?.(rec).catch(() => '')) || ''
+      const qx = (rec.pendingUpload || !rec.fileQx ? await this.hooks.bookQuickXor?.(rec).catch(() => '') : rec.fileQx) || ''
+      if (qx && qx !== rec.fileQx && remote.hash !== qx) {
+        // 本机文件改了、OneDrive 客户端还没传上去：先记下新指纹，等它传完
+        updates.push({ ...rec, fileQx: qx, updatedAt: Date.now() })
+        continue
+      }
       if (!qx || remote.hash !== qx) continue
       const patch: Partial<BookRecord> = {}
       if (rec.fileQx !== qx) patch.fileQx = qx

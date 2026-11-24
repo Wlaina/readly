@@ -1120,8 +1120,8 @@ export const useStore = create<State>((set, get) => {
         return
       }
       patchBook(hash, b => ({
-        ...(qx ? { fileQx: qx } : {}),
         ...b,
+        ...(qx ? { fileQx: qx } : { fileQx: undefined }),
         // 文件里的书名作者是外部改的：以文件为准
         title: parsed.rec.title,
         author: parsed.rec.author,
