@@ -561,6 +561,17 @@ export async function repairImages(hash: string) {
   const fills = new Map<string, Map<number, EpubImage>>()
   let done = 0
   let skipped = 0
+  // 网站上的章节目录（只取一次）：链接失效的章节（broken-…）要靠它从上一章找过去
+  let remote: Promise<Map<string, SourceChapter>> | null = null
+  const remoteChapter = (cid: string) =>
+    (remote ??= src
+      .getVolumes(manifest.id)
+      .then(vs => new Map(vs.flatMap(v => v.chapters.map(c => [c.id, c] as const))))
+      .catch(() => new Map<string, SourceChapter>())).then(m => {
+      // broken-<卷序号>-<章名>：网站后来插了新卷时卷序号会变，按章名再找一次
+      const name = cid.replace(/^broken-\d+-/, '')
+      return m.get(cid) ?? [...m.values()].find(c => c.id.startsWith('broken-') && c.id.replace(/^broken-\d+-/, '') === name)
+    })
   try {
     for (const ch of chapters) {
       let urls: string[] | null = null
@@ -571,9 +582,12 @@ export async function repairImages(hash: string) {
         const ci = Number(m?.[2]) - 1
         const vol = manifest.volumes.find((v, i) => (v.file ?? i) === vi)
         const cid = vol?.chapters[ci]
-        if (cid && !cid.startsWith('broken')) {
-          const url = src.id === 'linovelib' ? `${src.home}/novel/${manifest.id}/${cid}.html` : ''
-          const content = await src.getChapter(manifest.id, { id: cid, title: ch.title, url }).catch(e => {
+        if (cid) {
+          // 链接失效的章节：用网站目录里的那一章（带着上一章，下载时也是这样从上一章的“下一章”找到它）
+          const known = cid.startsWith('broken') ? await remoteChapter(cid) : undefined
+          const url = src.id === 'linovelib' && !known ? `${src.home}/novel/${manifest.id}/${cid}.html` : ''
+          const chapter: SourceChapter = known ?? { id: cid, title: ch.title, url }
+          const content = await src.getChapter(manifest.id, chapter).catch(e => {
             console.warn('补全插图：打不开章节', ch.title, e)
             return null
           })
@@ -603,7 +617,7 @@ export async function repairImages(hash: string) {
         ? skipped
           ? tr('《{title}》补上了 {n} 张插图，还有 {m} 张没找到', { title: cur.title, n: filled, m: skipped })
           : tr('《{title}》补上了 {n} 张插图', { title: cur.title, n: filled })
-        : tr('《{title}》的插图没能补上，请稍后再试', { title: cur.title }),
+        : tr('《{title}》还缺 {m} 张插图，网站上找不到原图，暂时没法补', { title: cur.title, m: skipped }),
     )
   } catch (e) {
     endTask(tid, e)

@@ -877,7 +877,7 @@ export const EN: Record<string, string | ((v: V) => string)> = {
   '登录失败': 'Sign-in failed',
   '通过 OneDrive 在电脑与手机之间同步书籍、进度与书签': 'Sync books, progress and bookmarks between your computer and phone via OneDrive',
   '《{title}》没有缺的插图': '“{title}” has no missing illustrations',
-  '《{title}》的插图没能补上，请稍后再试': 'Couldn’t restore the illustrations of “{title}”; please try again later',
+  '《{title}》还缺 {m} 张插图，网站上找不到原图，暂时没法补': '“{title}” is still missing {m} illustrations that can’t be found on the site',
   '《{title}》补上了 {n} 张插图': 'Restored {n} illustrations in “{title}”',
   '《{title}》补上了 {n} 张插图，还有 {m} 张没找到': 'Restored {n} illustrations in “{title}”; {m} couldn’t be found',
   '补全插图': 'Restore missing illustrations',
