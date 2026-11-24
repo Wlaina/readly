@@ -432,6 +432,30 @@ export const useStore = create<State>((set, get) => {
     clearInterval(autoTimer)
     const min = get().sync.interval
     if (canSync() && min > 0) autoTimer = setInterval(() => get().runSync(), min * 60_000)
+    watchOneDrive()
+  }
+
+  /**
+   * 电脑上用 OneDrive 同步时：OneDrive 客户端会把其他设备的记录下载到本机的 OneDrive\Readly\devices。
+   * 每 20 秒看一眼那里有没有变，变了就马上同步，不用等定时同步（手机上改的东西一两分钟内就到电脑）
+   */
+  let watchTimer: ReturnType<typeof setInterval> | undefined
+  let watchedAt = 0
+  const watchOneDrive = () => {
+    clearInterval(watchTimer)
+    const s = get().sync
+    if (!oneDriveRoot || s.provider !== 'onedrive' || !canSync()) return
+    const dir = `${oneDriveRoot.replace(/[\\/]+$/, '')}\\${s.root.split('/').filter(Boolean).join('\\')}\\devices`
+    watchedAt = 0
+    watchTimer = setInterval(async () => {
+      if (get().reading || syncing) return
+      const t = await import('@tauri-apps/api/core')
+        .then(m => m.invoke<number>('dir_mtime', { path: dir }))
+        .catch(() => 0)
+      if (!t) return
+      if (watchedAt && t > watchedAt) get().runSync()
+      watchedAt = t
+    }, 20_000)
   }
 
   return {
@@ -650,6 +674,9 @@ export const useStore = create<State>((set, get) => {
           failed && tr('{n} 本存入失败', { n: failed }),
         ].filter(Boolean)
         if (parts.length) get().showToast(tr('书籍文件夹：{list}', { list: parts.join(isEn() ? ', ' : '，') }))
+        // OneDrive 同步：刚存进 OneDrive 文件夹的书，等 OneDrive 客户端传上去后再同步一次，
+        // 登记它在 OneDrive 里的位置、删掉 Readly/files 里多余的那份
+        if (added && get().sync.provider === 'onedrive' && canSync()) setTimeout(() => get().runSync(), 60_000)
       })().finally(() => {
         collecting = null
       })

@@ -191,6 +191,17 @@ fn walk_books(dir: &Path, root: &Path, depth: u32, out: &mut Vec<FolderEntry>) {
     }
 }
 
+/// 用临时文件换掉正式文件。先直接改名；有些电脑上的文件夹（例如被某些文件系统过滤程序接管的 AppData\\Roaming）
+/// 不允许改名，会报“无法将文件移到不同的磁盘驱动器”（错误 17），这时改成复制过去再删掉临时文件
+fn replace_file(tmp: &Path, target: &Path) -> Result<(), String> {
+    if std::fs::rename(tmp, target).is_ok() {
+        return Ok(());
+    }
+    let r = std::fs::copy(tmp, target).map(|_| ()).map_err(|e| e.to_string());
+    let _ = std::fs::remove_file(tmp);
+    r
+}
+
 /// 递归列出文件夹里的 epub / txt
 #[tauri::command]
 fn scan_folder(path: String) -> Result<Vec<FolderEntry>, String> {
@@ -238,10 +249,7 @@ fn write_folder_file(request: tauri::ipc::Request<'_>) -> Result<FolderEntry, St
     }
     let tmp = target.with_extension("readly-tmp");
     std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &target).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        e.to_string()
-    })?;
+    replace_file(&tmp, &target)?;
     let md = std::fs::metadata(&target).map_err(|e| e.to_string())?;
     let mtime = md
         .modified()
@@ -290,10 +298,7 @@ fn create_folder_file(request: tauri::ipc::Request<'_>) -> Result<FolderEntry, S
     }
     let tmp = target.with_extension("readly-tmp");
     std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &target).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        e.to_string()
-    })?;
+    replace_file(&tmp, &target)?;
     let md = std::fs::metadata(&target).map_err(|e| e.to_string())?;
     let mtime = md
         .modified()
@@ -362,7 +367,11 @@ fn book_path(app: &tauri::AppHandle, rel: &str) -> Result<PathBuf, String> {
     if !rel.starts_with("books/") || rel.contains("..") || rel.contains('\\') {
         return Err("只允许书籍文件".into());
     }
-    Ok(app.path().app_data_dir().map_err(|e| e.to_string())?.join(rel))
+    let mut p = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    for seg in rel.split('/') {
+        p.push(seg);
+    }
+    Ok(p)
 }
 
 fn dav_client() -> Result<tauri_plugin_http::reqwest::Client, String> {
@@ -458,10 +467,7 @@ async fn dav_download(app: tauri::AppHandle, url: String, auth: String, file: St
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
-    std::fs::rename(&tmp, &path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        e.to_string()
-    })?;
+    replace_file(&tmp, &path)?;
     let _ = app.emit("dav-progress", (task, loaded, total.max(loaded)));
     Ok(loaded)
 }
@@ -658,6 +664,21 @@ async fn file_quickxor(path: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || std::fs::read(&p).map(|d| quickxor(&d)).map_err(|e| e.to_string()))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// 文件夹里各文件最新的修改时间（毫秒，只看这一层）；文件夹不存在为 0。
+/// 电脑上用它留意 OneDrive 客户端有没有把其他设备的新记录下载下来
+#[tauri::command]
+fn dir_mtime(path: String) -> u64 {
+    std::fs::read_dir(&path)
+        .map(|it| {
+            it.filter_map(|e| e.ok()?.metadata().ok()?.modified().ok())
+                .filter_map(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0)
 }
 
 /// 电脑上 OneDrive 客户端同步的本地文件夹（没装 OneDrive 或不是 Windows 为空）
@@ -947,7 +968,8 @@ pub fn run() {
             od_upload,
             book_quickxor,
             file_quickxor,
-            onedrive_root
+            onedrive_root,
+            dir_mtime
         ])
         .run(tauri::generate_context!())
         .expect("error while running Readly");
