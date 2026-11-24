@@ -227,6 +227,14 @@ class MainActivity : TauriActivity() {
       false
     }
 
+    /** 登录 OneDrive 后从浏览器切回 Readly */
+    @JavascriptInterface
+    fun bringToFront() {
+      runOnUiThread {
+        startActivity(Intent(this@MainActivity, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
+      }
+    }
+
     @JavascriptInterface
     fun commitFile(path: String): Boolean = try {
       val part = privateFile("$path.readly-part")

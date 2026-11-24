@@ -16,7 +16,8 @@
  */
 import type { Annotation, BookRecord, Bookmark, Category } from './types'
 import type { Settings } from './settings'
-import { DavError, WebDAV, type DavEntry, type WebDAVConfig } from './webdav'
+import { DavError, WebDAV, type DavEntry, type RemoteStore, type WebDAVConfig } from './webdav'
+import { OneDrive } from './onedrive'
 import { deviceClass, getDevice } from './device'
 import { endTask, startTask, updateTask } from './tasks'
 import { tr } from './i18n'
@@ -29,6 +30,14 @@ export interface SyncConfig extends WebDAVConfig {
   interval: number
   /** 自动导入手动放入云端根目录的书 */
   scanRoot: boolean
+  /** 同步到哪里：WebDAV（默认）或直接连 OneDrive */
+  provider?: 'webdav' | 'onedrive'
+  /** OneDrive：Azure 应用注册的客户端 ID、登录凭据（refresh token，写盘时加密）、账号名（显示用） */
+  odClientId?: string
+  odRefresh?: string
+  odAccount?: string
+  /** 换到 OneDrive 的时间：在这之前就有的书默认已经在云上，不再整批上传 */
+  odSince?: number
 }
 
 export const DEFAULT_SYNC: SyncConfig = {
@@ -159,6 +168,9 @@ export function mergeBook(local: BookRecord | undefined, remote: RemoteBook): Bo
     deletedAt: metaSrc.deletedAt,
     metaUpdatedAt: metaSrc.metaUpdatedAt,
     remotePath: local.remotePath ?? remote.remotePath,
+    cloudPath: metaSrc.cloudPath ?? local.cloudPath ?? remote.cloudPath,
+    // 文件指纹跟着文件版本走：取文件版本较新的一方
+    fileQx: (remote.fileRev ?? 0) > (local.fileRev ?? 0) ? (remote.fileQx ?? local.fileQx) : (local.fileQx ?? remote.fileQx),
     fileRev: Math.max(local.fileRev ?? 0, remote.fileRev ?? 0) || undefined,
     progress,
     lastReadAt: Math.max(local.lastReadAt ?? 0, remote.lastReadAt ?? 0) || undefined,
@@ -186,6 +198,8 @@ function fingerprint(b: BookRecord | RemoteBook) {
     b.metaUpdatedAt,
     b.deletedAt ?? 0,
     b.remotePath ?? '',
+    b.cloudPath ?? '',
+    b.fileQx ?? '',
     b.statsClearedAt ?? 0,
     b.fileRev ?? 0,
     b.catsAt ?? 0,
@@ -243,6 +257,18 @@ export interface SyncHooks {
    * （有真实进度；安卓上不会因为在网页和原生层之间搬几十 MB 而卡住界面）
    */
   localBookPath?: (rec: BookRecord) => string | null
+  /**
+   * 电脑上：这本书在 OneDrive 客户端同步的文件夹里（例如 D:\\OneDrive\\Book）时，
+   * 返回它在 OneDrive 里的路径和本机的完整路径。这样的书由 OneDrive 客户端负责上传，Readly 不再另传一份
+   */
+  cloudFolderFile?: (rec: BookRecord) => { cloudPath: string; abs: string } | null
+  /** 文件指纹（OneDrive 的 quickXorHash）：应用数据里的书籍文件 / 电脑上的任意书籍文件 */
+  bookQuickXor?: (rec: BookRecord) => Promise<string>
+  fileQuickXor?: (abs: string) => Promise<string>
+  /** 电脑上：OneDrive 客户端已经把新版本下到书籍文件夹了，把它读进书架（不当作本机的修改） */
+  adoptFolderFile?: (rec: BookRecord, abs: string) => Promise<boolean>
+  /** OneDrive 续期后换了新的登录凭据：存起来 */
+  saveOneDriveToken?: (refreshToken: string) => void
   /** 原生层把书籍文件下载到磁盘之后（提取封面、写回书籍文件夹等） */
   bookFileWritten?: (rec: BookRecord) => Promise<void>
   /** 导入云端手动放入的书，返回生成的记录 */
@@ -255,14 +281,17 @@ export interface SyncHooks {
 }
 
 export class SyncEngine {
-  private dav: WebDAV
+  private dav: RemoteStore
   private root: string
   constructor(
     private cfg: SyncConfig,
     private hooks: SyncHooks,
     private memo: SyncMemo,
   ) {
-    this.dav = new WebDAV(cfg)
+    this.dav =
+      cfg.provider === 'onedrive'
+        ? new OneDrive(cfg.odClientId ?? '', cfg.odRefresh ?? '', t => hooks.saveOneDriveToken?.(t))
+        : new WebDAV(cfg)
     this.root = '/' + cfg.root.split('/').filter(Boolean).join('/')
   }
 
@@ -278,7 +307,7 @@ export class SyncEngine {
   }
 
   private async ensureDirs(force = false) {
-    const key = `${this.cfg.url}|${this.root}|${this.cfg.syncFiles}`
+    const key = `${this.cfg.provider === 'onedrive' ? 'onedrive:' + this.cfg.odAccount : this.cfg.url}|${this.root}|${this.cfg.syncFiles}`
     if (!force && this.memo.dirs === key) return
     await this.dav.ensureDir(`${this.root}/devices`)
     if (this.cfg.syncFiles) await this.dav.ensureDir(`${this.root}/files`)
@@ -462,7 +491,8 @@ export class SyncEngine {
     if (await this.push()) log(tr('已上传本机阅读记录'))
 
     // 5. 书籍文件
-    if (this.cfg.syncFiles && filesList && !opts.light) await this.syncFiles(filesList)
+    // 第一次同步时 files 目录刚建好、列不到：当作空目录
+    if (this.cfg.syncFiles && !opts.light) await this.syncFiles(filesList ?? [])
 
     // 6. 设置（电脑/手机分开）
     if (this.cfg.syncSettings && rootList) await this.syncSettings(rootList)
@@ -507,18 +537,18 @@ export class SyncEngine {
    * 上传一本书的书籍文件，记录为传输任务。应用里交给原生层从磁盘直接上传（有真实进度）；
    * 进度到头后还要等云端收完、存好才算完成，这段时间显示 99%，不让人以为卡在 100%
    */
-  private async uploadBook(rec: BookRecord) {
+  private async uploadBook(rec: BookRecord, to = this.filePath(rec)) {
     const local = this.hooks.localBookPath?.(rec)
     const id = startTask('upload', rec.title, { total: rec.size || undefined, loaded: 0, unit: 'bytes' })
     try {
       if (local) {
-        await this.dav.transferFile('upload', this.filePath(rec), local, (sent, total) =>
+        await this.dav.transferFile('upload', to, local, (sent, total) =>
           updateTask(id, { loaded: Math.min(sent, Math.floor(total * 0.99)), total }),
         )
       } else {
         const bytes = await this.hooks.readBookFile(rec)
         if (!bytes) throw new Error(tr('读不到书籍文件'))
-        await this.dav.put(this.filePath(rec), bytes)
+        await this.dav.put(to, bytes)
       }
       endTask(id)
     } catch (e) {
@@ -531,17 +561,17 @@ export class SyncEngine {
    * 下载一本书的书籍文件到本机，记录为传输任务。应用里由原生层边下边写进磁盘，
    * 浏览器里下载后再写入
    */
-  private async downloadBook(rec: BookRecord, size = 0) {
+  private async downloadBook(rec: BookRecord, size = 0, from = this.filePath(rec)) {
     const local = this.hooks.localBookPath?.(rec)
     if (!local) {
-      const bytes = await this.download(this.filePath(rec), rec.title, size)
+      const bytes = await this.download(from, rec.title, size)
       await this.hooks.writeBookFile(rec, bytes)
       return bytes.byteLength
     }
     const id = startTask('download', rec.title, { total: size || undefined, loaded: 0, unit: 'bytes' })
     try {
       const got = Number(
-        await this.dav.transferFile('download', this.filePath(rec), local, (loaded, total) => updateTask(id, { loaded, total: total || size || undefined })),
+        await this.dav.transferFile('download', from, local, (loaded, total) => updateTask(id, { loaded, total: total || size || undefined })),
       )
       endTask(id)
       await this.hooks.bookFileWritten?.(rec)
@@ -556,39 +586,129 @@ export class SyncEngine {
     const { log } = this.hooks
     const files = new Set(list.map(e => e.name))
     const sizes = new Map(list.map(e => [e.name, e.size]))
+    const od = this.dav instanceof OneDrive ? this.dav : null
     // 在线阅读的书没有书籍文件
     const books = this.hooks.getLibrary().filter(b => !b.deletedAt && !b.localOnly && !b.online)
-    const inCloud = (b: BookRecord) => !!b.remotePath || files.has(`${b.hash}.${b.format}`)
+    const inFiles = (b: BookRecord) => files.has(`${b.hash}.${b.format}`)
+
+    // OneDrive：电脑上 OneDrive 文件夹里的书交给 OneDrive 客户端上传，这里只核对、登记它在 OneDrive 里的路径
+    const managed = new Map<string, { cloudPath: string; abs: string }>()
+    if (od) {
+      for (const b of books) {
+        const m = b.hasFile ? this.hooks.cloudFolderFile?.(b) : null
+        if (m) managed.set(b.hash, m)
+      }
+      if (managed.size) await this.checkManaged(od, books, managed, files)
+    }
+    const fresh = () => new Map(this.hooks.getLibrary().map(b => [b.hash, b]))
+    let lib = fresh()
+    const cur = (b: BookRecord) => lib.get(b.hash) ?? b
+    // OneDrive：换过去之前就有的书默认已经在云上（电脑的书在 Book 文件夹里），不再整批上传一遍；
+    // 只传之后新加的书和改过的书
+    const since = this.cfg.provider === 'onedrive' ? (this.cfg.odSince ?? 0) : 0
+    const inCloud = (b: BookRecord) => !!b.remotePath || !!(od && b.cloudPath) || inFiles(b)
     // 上传：云端没有，或本机修改过书籍文件（编辑了书籍信息）
-    const uploads = books.filter(b => b.hasFile && ((!b.remotePath && !inCloud(b)) || b.pendingUpload))
+    const uploads = books
+      .map(cur)
+      .filter(b => b.hasFile && !managed.has(b.hash) && ((!b.remotePath && !inCloud(b) && b.addedAt > since) || b.pendingUpload))
     // 下载：本机没有，或其他设备更新过文件
-    const downloads = books.filter(
-      b => !b.pendingUpload && inCloud(b) && (!b.hasFile || (b.fileRev ?? 0) > (b.fileRevLocal ?? 0)),
-    )
+    const downloads = books
+      .map(cur)
+      .filter(b => !managed.has(b.hash) && !b.pendingUpload && inCloud(b) && (!b.hasFile || (b.fileRev ?? 0) > (b.fileRevLocal ?? 0)))
     let uploaded = 0
     await pool(uploads, 3, async rec => {
       log(tr('上传《{title}》', { title: rec.title }))
-      const ok = await this.uploadBook(rec).then(
+      // 先记下文件指纹：其他设备下载前用它核对拿到的是不是这个版本
+      const qx = od ? await this.hooks.bookQuickXor?.(rec).catch(() => '') : ''
+      const ok = await this.uploadBook(rec, od && rec.cloudPath ? rec.cloudPath : undefined).then(
         () => true,
         e => (log(tr('上传《{title}》失败：{e}', { title: rec.title, e: e instanceof Error ? e.message : String(e) })), false),
       )
       if (!ok) return
-      const cur = this.hooks.getLibrary().find(b => b.hash === rec.hash)
+      const now = this.hooks.getLibrary().find(b => b.hash === rec.hash)
       // 上传途中文件又被改了：这次传的不是最新的，留到下次再传
-      if (cur?.pendingUpload && (cur.fileRev ?? 0) === (rec.fileRev ?? 0)) {
-        this.hooks.saveBooks([{ ...cur, pendingUpload: false, fileRevUploaded: cur.fileRev }])
+      if (now?.pendingUpload && (now.fileRev ?? 0) === (rec.fileRev ?? 0)) {
+        this.hooks.saveBooks([{ ...now, pendingUpload: false, fileRevUploaded: now.fileRev, ...(qx ? { fileQx: qx } : {}) }])
         uploaded++
       }
     })
     // 新文件都传上去了：马上公布新的版本号，其他设备下次同步就会来下载
     if (uploaded) await this.push()
+    lib = fresh()
     await pool(downloads, 3, async rec => {
+      rec = cur(rec)
+      let from: string | undefined
+      if (od && rec.cloudPath) {
+        // 书在 OneDrive 的书籍文件夹里：先核对那里的文件是不是记录里说的版本（电脑上的 OneDrive 客户端可能还没传完）
+        const it = await od.item(rec.cloudPath).catch(() => null)
+        if (it && (!rec.fileQx || it.quickXor === rec.fileQx)) from = rec.cloudPath
+        else if (!inFiles(rec)) {
+          if (it) log(tr('《{title}》的新版本还没传到 OneDrive，下次同步再下载', { title: rec.title }))
+          return
+        }
+      }
       log(tr(rec.hasFile ? '更新《{title}》' : '下载《{title}》', { title: rec.title }))
-      const size = await this.downloadBook(rec, sizes.get(`${rec.hash}.${rec.format}`)).catch(() => null)
+      const size = await this.downloadBook(rec, sizes.get(`${rec.hash}.${rec.format}`), from).catch(() => null)
       if (size == null) return
-      const cur = this.hooks.getLibrary().find(b => b.hash === rec.hash)
-      if (cur) this.hooks.saveBooks([{ ...cur, hasFile: true, fileRevLocal: cur.fileRev ?? 0, size }])
+      const now = this.hooks.getLibrary().find(b => b.hash === rec.hash)
+      if (now) this.hooks.saveBooks([{ ...now, hasFile: true, fileRevLocal: now.fileRev ?? 0, size }])
     })
+    // 登记了新的 OneDrive 路径等：马上告诉其他设备
+    if (od) await this.push()
+  }
+
+  /**
+   * 电脑上 OneDrive 文件夹里的书：
+   * - OneDrive 上的文件和本机这个版本一样（指纹相同）：登记它在 OneDrive 里的路径，其他设备直接从那里下载；
+   *   以前另外传到 Readly/files 的那份删掉，不再占两份空间
+   * - 其他设备改过这本书、OneDrive 客户端已经把新版本下到本机文件夹：读进书架
+   * - 其他情况（OneDrive 客户端还没传完 / 还没下完）：等下次同步
+   */
+  private async checkManaged(od: OneDrive, books: BookRecord[], managed: Map<string, { cloudPath: string; abs: string }>, files: Set<string>) {
+    const { log } = this.hooks
+    // 按文件夹列一次目录，拿到每个文件的指纹
+    const dirs = new Map<string, Map<string, DavEntry>>()
+    for (const { cloudPath } of managed.values()) {
+      const dir = cloudPath.slice(0, cloudPath.lastIndexOf('/'))
+      if (!dirs.has(dir)) dirs.set(dir, new Map(((await od.propfind(dir).catch(() => null)) ?? []).map(e => [e.name, e])))
+    }
+    const updates: BookRecord[] = []
+    let adopted = 0
+    for (const b of books) {
+      const m = managed.get(b.hash)
+      if (!m) continue
+      const dir = m.cloudPath.slice(0, m.cloudPath.lastIndexOf('/'))
+      const remote = dirs.get(dir)?.get(m.cloudPath.slice(m.cloudPath.lastIndexOf('/') + 1))
+      if (!remote?.hash) continue
+      const rec = b
+      // 其他设备改过这本书：等 OneDrive 客户端把新版本下到文件夹，再读进来
+      if ((rec.fileRev ?? 0) > (rec.fileRevLocal ?? 0) && !rec.pendingUpload) {
+        if (rec.fileQx && remote.hash === rec.fileQx) {
+          const local = await this.hooks.fileQuickXor?.(m.abs).catch(() => '')
+          if (local === rec.fileQx && (await this.hooks.adoptFolderFile?.(rec, m.abs))) adopted++
+        }
+        continue
+      }
+      const qx = rec.fileQx || (await this.hooks.bookQuickXor?.(rec).catch(() => '')) || ''
+      if (!qx || remote.hash !== qx) continue
+      const patch: Partial<BookRecord> = {}
+      if (rec.fileQx !== qx) patch.fileQx = qx
+      if (rec.cloudPath !== m.cloudPath) {
+        patch.cloudPath = m.cloudPath
+        patch.metaUpdatedAt = Date.now()
+      }
+      // 本机改过的版本已经由 OneDrive 客户端传上去了
+      if (rec.pendingUpload) Object.assign(patch, { pendingUpload: false, fileRevUploaded: rec.fileRev })
+      if (Object.keys(patch).length) updates.push({ ...rec, ...patch, updatedAt: Date.now() })
+      // 以前传到 Readly/files 的那份：不需要了
+      if (files.has(`${rec.hash}.${rec.format}`)) {
+        await od.remove(`${this.root}/files/${rec.hash}.${rec.format}`).catch(() => {})
+        files.delete(`${rec.hash}.${rec.format}`)
+        log(tr('《{title}》改用 OneDrive 书籍文件夹里的文件，删掉了多余的一份', { title: rec.title }))
+      }
+    }
+    if (updates.length) this.hooks.saveBooks(updates)
+    if (adopted) log(tr('从 OneDrive 文件夹读入了 {n} 本更新过的书', { n: adopted }))
   }
 
   private async syncSettings(rootList: DavEntry[]) {
@@ -619,7 +739,8 @@ export class SyncEngine {
 
   /** 下载单个书籍文件（点击云端书籍时） */
   async downloadFile(rec: BookRecord) {
-    const ok = await this.downloadBook(rec, rec.size).then(
+    const from = this.dav instanceof OneDrive && rec.cloudPath ? rec.cloudPath : undefined
+    const ok = await this.downloadBook(rec, rec.size, from).then(
       () => true,
       () => false,
     )

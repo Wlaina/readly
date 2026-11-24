@@ -88,6 +88,10 @@ export interface BookRecord {
   /** 清除统计的时间：合并时丢弃此前的统计，让清除在所有设备上生效 */
   statsClearedAt?: number
   lastReadAt?: number
+  /** OneDrive 同步：这本书在 OneDrive 里的路径（电脑上 OneDrive 文件夹里的书，例如 /Book/xxx.epub），其他设备直接从这里下载 */
+  cloudPath?: string
+  /** 当前这个文件版本的指纹（OneDrive 的 quickXorHash），下载前用它核对拿到的是不是这个版本 */
+  fileQx?: string
   /** 这本书所属的分类 id（可以属于多个） */
   categories?: string[]
   /** 分类归属的修改时间（LWW，同步时较新的一方胜出） */

@@ -1033,3 +1033,10 @@ kbd {
 .cover-grid img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .cover-empty { font-size: 13px; color: var(--muted); text-align: center; margin: 14px 0; }
 .cover-actions { align-items: center; }
+
+/* 同步设置：选择 WebDAV / OneDrive */
+.sync-provider { margin: 2px 0 12px; }
+.sync-note { font-size: 13px; line-height: 1.6; color: var(--text-2); margin: 0 0 10px; }
+.field-hint { font-size: 12px; line-height: 1.55; color: var(--muted); margin: 4px 0 10px; }
+.sync-account { display: flex; align-items: center; gap: 6px; font-size: 13.5px; margin: 12px 0 2px; }
+.sync-account svg { width: 16px; height: 16px; vertical-align: -3px; }

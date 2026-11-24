@@ -466,6 +466,248 @@ async fn dav_download(app: tauri::AppHandle, url: String, auth: String, file: St
     Ok(loaded)
 }
 
+/* ---------- OneDrive 直连同步 ---------- */
+
+/// 登录 OneDrive 时，浏览器登录完会跳回 http://localhost:<端口>/?code=…：在本机临时开一个端口接住它。
+/// IPv4、IPv6 都监听（浏览器把 localhost 解析成哪个都能接到）
+static OAUTH_LISTENERS: Mutex<Vec<std::net::TcpListener>> = Mutex::new(Vec::new());
+
+#[tauri::command]
+fn oauth_listen() -> Result<u16, String> {
+    let v4 = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    let port = v4.local_addr().map_err(|e| e.to_string())?.port();
+    let mut list = vec![v4];
+    if let Ok(v6) = std::net::TcpListener::bind(("::1", port)) {
+        list.push(v6);
+    }
+    *OAUTH_LISTENERS.lock().unwrap() = list;
+    Ok(port)
+}
+
+/// 等浏览器跳回来，返回地址里 ? 后面的部分（code=…&state=… 或 error=…）；超时或取消返回错误
+#[tauri::command]
+async fn oauth_wait(timeout_secs: u64) -> Result<String, String> {
+    let listeners = std::mem::take(&mut *OAUTH_LISTENERS.lock().unwrap());
+    if listeners.is_empty() {
+        return Err("没有在等登录".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::{Read, Write};
+        for l in &listeners {
+            l.set_nonblocking(true).map_err(|e| e.to_string())?;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        while std::time::Instant::now() < deadline {
+            if OAUTH_CANCEL.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                return Err("已取消登录".into());
+            }
+            for l in &listeners {
+                let Ok((mut conn, _)) = l.accept() else { continue };
+                let _ = conn.set_nonblocking(false);
+                let _ = conn.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                let mut buf = [0u8; 8192];
+                let n = conn.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let target = req.split_whitespace().nth(1).unwrap_or("").to_string();
+                let query = target.split_once('?').map(|(_, q)| q.to_string()).unwrap_or_default();
+                if !(query.contains("code=") || query.contains("error=")) {
+                    let _ = conn.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    continue;
+                }
+                let ok = query.contains("code=");
+                let body = format!(
+                    "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width\"><title>Readly</title>\
+                     <body style=\"font:16px system-ui;text-align:center;padding:48px 16px;background:#faf9f5;color:#3d3929\">\
+                     <h2>{}</h2><p>{}</p></body>",
+                    if ok { "已登录 OneDrive" } else { "没有登录成功" },
+                    if ok { "可以关掉这个页面，回到 Readly。" } else { "请回到 Readly 再试一次。" }
+                );
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = conn.write_all(head.as_bytes());
+                let _ = conn.write_all(body.as_bytes());
+                return Ok(query);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(120));
+        }
+        Err("登录超时".into())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+static OAUTH_CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[tauri::command]
+fn oauth_cancel() {
+    OAUTH_CANCEL.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// 向微软登录服务换取 / 续期令牌（表单 POST）。不经过网页：网页发的请求带 Origin，
+/// 微软会当成“单页应用”拒绝桌面 / 手机应用的令牌请求。返回 [状态码, 响应正文]
+#[tauri::command]
+async fn oauth_token(form: String) -> Result<(u16, String), String> {
+    let resp = dav_client()?
+        .post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(form)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    Ok((status, resp.text().await.map_err(|e| e.to_string())?))
+}
+
+/// OneDrive 分片上传：把应用数据目录里的书籍文件按 10MB 一片传到上传会话地址（会话由前端建好，地址自带授权）。
+/// 每片失败会重试 3 次；发 `dav-progress` 事件。返回最后一片的响应（新文件的信息 JSON）
+#[tauri::command]
+async fn od_upload(app: tauri::AppHandle, upload_url: String, file: String, task: String) -> Result<String, String> {
+    if !upload_url.starts_with("https://") {
+        return Err("只允许网页地址".into());
+    }
+    let path = book_path(&app, &file)?;
+    let data = bytes::Bytes::from(std::fs::read(&path).map_err(|e| format!("读不到书籍文件：{e}"))?);
+    let total = data.len();
+    // 分片大小必须是 320KB 的整数倍
+    const CHUNK: usize = 320 * 1024 * 32;
+    let client = dav_client()?;
+    let mut offset = 0usize;
+    let mut last = String::new();
+    while offset < total || total == 0 {
+        let end = (offset + CHUNK).min(total);
+        let mut tries = 0;
+        loop {
+            tries += 1;
+            let res = client
+                .put(&upload_url)
+                .header("Content-Length", (end - offset).to_string())
+                .header("Content-Range", format!("bytes {}-{}/{}", offset, end.max(1) - 1, total))
+                .body(data.slice(offset..end))
+                .send()
+                .await;
+            match res {
+                Ok(r) if r.status().is_success() => {
+                    last = r.text().await.unwrap_or_default();
+                    break;
+                }
+                Ok(r) if tries >= 3 || r.status().as_u16() == 404 => return Err(format!("HTTP {}", r.status().as_u16())),
+                Err(e) if tries >= 3 => return Err(e.to_string()),
+                _ => tokio::time::sleep(std::time::Duration::from_secs(2 * tries)).await,
+            }
+        }
+        offset = end;
+        let _ = app.emit("dav-progress", (task.clone(), offset, total));
+        if total == 0 {
+            break;
+        }
+    }
+    Ok(last)
+}
+
+/// OneDrive 的文件指纹 quickXorHash：160 位的循环寄存器，第 i 个字节异或到第 (i*11) mod 160 位，最后再异或上文件长度。
+/// 用它判断 OneDrive 上的文件是不是本机这个版本（电脑上的 OneDrive 客户端可能还没把新版本传上去）
+fn quickxor(data: &[u8]) -> String {
+    use base64::Engine;
+    // 每 160 个字节落在同样的位置：先按位置把字节异或到一起
+    let mut acc = [0u8; 160];
+    let mut chunks = data.chunks_exact(160);
+    for c in &mut chunks {
+        for (a, b) in acc.iter_mut().zip(c) {
+            *a ^= *b;
+        }
+    }
+    for (a, b) in acc.iter_mut().zip(chunks.remainder()) {
+        *a ^= *b;
+    }
+    let mut reg = [0u8; 20];
+    for (k, &b) in acc.iter().enumerate() {
+        if b == 0 {
+            continue;
+        }
+        let s = (k * 11) % 160;
+        let (bi, off) = (s / 8, s % 8);
+        reg[bi] ^= ((b as u16) << off) as u8;
+        if off > 0 {
+            reg[(bi + 1) % 20] ^= ((b as u16) >> (8 - off)) as u8;
+        }
+    }
+    for (i, l) in (data.len() as u64).to_le_bytes().iter().enumerate() {
+        reg[12 + i] ^= l;
+    }
+    base64::engine::general_purpose::STANDARD.encode(reg)
+}
+
+/// 应用数据目录里一本书的 quickXorHash
+#[tauri::command]
+async fn book_quickxor(app: tauri::AppHandle, file: String) -> Result<String, String> {
+    let path = book_path(&app, &file)?;
+    tauri::async_runtime::spawn_blocking(move || std::fs::read(&path).map(|d| quickxor(&d)).map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 电脑上书籍文件夹里一本书的 quickXorHash（只允许书籍文件）
+#[tauri::command]
+async fn file_quickxor(path: String) -> Result<String, String> {
+    let p = PathBuf::from(&path);
+    if !is_book(&p) {
+        return Err("只允许书籍文件".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || std::fs::read(&p).map(|d| quickxor(&d)).map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 电脑上 OneDrive 客户端同步的本地文件夹（没装 OneDrive 或不是 Windows 为空）
+#[tauri::command]
+fn onedrive_root() -> Option<String> {
+    #[cfg(windows)]
+    {
+        for k in ["OneDriveConsumer", "OneDrive"] {
+            if let Ok(v) = std::env::var(k) {
+                if !v.is_empty() && Path::new(&v).is_dir() {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod quickxor_tests {
+    
+    /// 和 rclone（backend/onedrive/quickxorhash）的测试数据对照
+    #[test]
+    fn rclone_vectors() {
+        use base64::Engine;
+        let b64 = |s: &str| base64::engine::general_purpose::STANDARD.decode(s).unwrap();
+        for (input, out) in [
+            ("tbQ=", "taAFAAAAAAAAAAAAAgAAAAAAAAA="),
+            ("2fuxhBJXtpWFe8dOfdGeHw==", "O9tHLAghgSvYohKFyMMxnNCHaHg="),
+            ("qQ70RB++JAR5ljNv3lJt1PpqETPsckopfonItu18Cr3E", "FkJaeg/0Z5+euShYlLpE2tJh+Lo="),
+            ("0n7nl3YJtipy6yeUbVPWtc2h45WbF9u8hTz5tNwj3dZZwfXWkk+GN3g=", "YJLNK7JR64j9aODWfqDvEe/u6NU="),
+        ] {
+            assert_eq!(super::quickxor(&b64(input)), out, "{input}");
+        }
+    }
+
+    #[test]
+    fn empty_and_small() {
+        assert_eq!(super::quickxor(b""), "AAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+        // 只有一个字节 0x01：落在第 0 位；长度 1 异或在第 12 个字节
+        assert_eq!(super::quickxor(&[1]), {
+            use base64::Engine;
+            let mut r = [0u8; 20];
+            r[0] = 1;
+            r[12] = 1;
+            base64::engine::general_purpose::STANDARD.encode(r)
+        });
+    }
+}
+
 /// 安卓：读取 MainActivity 复制到缓存目录的书籍文件，读完即删
 #[tauri::command]
 fn read_cache_file(path: String) -> Result<tauri::ipc::Response, String> {
@@ -697,7 +939,15 @@ pub fn run() {
             browser_cancel,
             fetch_image,
             dav_upload,
-            dav_download
+            dav_download,
+            oauth_listen,
+            oauth_wait,
+            oauth_cancel,
+            oauth_token,
+            od_upload,
+            book_quickxor,
+            file_quickxor,
+            onedrive_root
         ])
         .run(tauri::generate_context!())
         .expect("error while running Readly");

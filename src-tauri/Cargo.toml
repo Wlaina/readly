@@ -23,6 +23,8 @@ percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["stream"] }
 futures-util = { version = "0.3", default-features = false }
 bytes = "1"
+# OneDrive 的文件指纹 quickXorHash 用 base64 表示
+base64 = "0.22"
 
 tokio = { version = "1", features = ["time", "sync"] }
 

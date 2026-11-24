@@ -20,7 +20,9 @@ export default function SyncPage() {
   const [testing, setTesting] = useState(false)
   const [testOk, setTestOk] = useState<boolean | null>(null)
   const [showPwd, setShowPwd] = useState(false)
-  const configured = !!(sync.url && sync.username && sync.password)
+  const [loggingIn, setLoggingIn] = useState(false)
+  const od = sync.provider === 'onedrive'
+  const configured = od ? !!(sync.odClientId && sync.odRefresh) : !!(sync.url && sync.username && sync.password)
   const preset = DAV_PRESETS.find(p => sync.url.replace(/\/+$/, '') === p.url.replace(/\/+$/, ''))
   const runningCount = useTasks(s => s.tasks.filter(t => t.status === 'running').length)
   // 记住上次看的是“传输任务”还是“同步设置”；还没配置同步时默认打开设置
@@ -48,7 +50,7 @@ export default function SyncPage() {
         <header className="page-head">
           <div>
             <h1>{tr('云同步')}</h1>
-            <div className="sub">{tr('通过 WebDAV 在电脑与手机之间同步书籍、进度与书签')}</div>
+            <div className="sub">{tr(od ? '通过 OneDrive 在电脑与手机之间同步书籍、进度与书签' : '通过 WebDAV 在电脑与手机之间同步书籍、进度与书签')}</div>
           </div>
           <span className={`status-pill ${status}`}>
             <i />
@@ -71,84 +73,156 @@ export default function SyncPage() {
           <TransferPanel />
         ) : (
         <>
-        <Card title={tr('WebDAV 服务器')}>
+        <Card title={tr('同步到哪里')}>
           <Row label={tr('开启同步')}>
             <Toggle on={sync.enabled} onChange={v => (updateSync({ enabled: v }), v && configured && runSync())} />
           </Row>
           <div style={{ padding: '4px 0 14px' }}>
-            <label className="field-label">{tr('服务商')}</label>
-            <div className="chips">
-              {DAV_PRESETS.map(p => (
-                <button key={p.id} className={`chip ${preset?.id === p.id ? 'on' : ''}`} onClick={() => updateSync({ url: p.url })}>
-                  <span>{tr(p.name)}</span>
-                </button>
-              ))}
-              <button className={`chip ${!preset ? 'on' : ''}`} onClick={() => updateSync({ url: '' })}>
-                <span>{tr('自定义')}</span>
-              </button>
+            <div className="sync-provider">
+              <Segmented
+                value={od ? 'onedrive' : 'webdav'}
+                options={[
+                  ['webdav', 'WebDAV'],
+                  ['onedrive', 'OneDrive'],
+                ]}
+                onChange={v => (setTestOk(null), updateSync({ provider: v }))}
+              />
             </div>
-            <label className="field-label">{tr('服务器地址')}</label>
-            <input
-              className="field mono"
-              value={sync.url}
-              placeholder="https://dav.jianguoyun.com/dav/"
-              onChange={e => updateSync({ url: e.target.value.trim() })}
-              autoCapitalize="off"
-              spellCheck={false}
-            />
-            <div className="grid-2">
-              <div>
-                <label className="field-label">{tr('账号')}</label>
+            {od ? (
+              <>
+                <p className="sync-note">
+                  {tr('直接读写你自己 OneDrive 里的文件，不经过其他服务器。电脑上放在 OneDrive 文件夹里的书不会再另传一份，手机直接从 OneDrive 下载。')}
+                </p>
+                <label className="field-label">{tr('应用程序（客户端）ID')}</label>
                 <input
-                  className="field"
-                  value={sync.username}
-                  onChange={e => updateSync({ username: e.target.value.trim() })}
+                  className="field mono"
+                  value={sync.odClientId ?? ''}
+                  placeholder="00000000-0000-0000-0000-000000000000"
+                  onChange={e => updateSync({ odClientId: e.target.value.trim() })}
                   autoCapitalize="off"
                   autoComplete="off"
                   spellCheck={false}
                 />
-              </div>
-              <div>
-                <label className="field-label">{tr('密码（应用密码）')}</label>
-                <div style={{ position: 'relative' }}>
-                  <input
-                    className="field"
-                    type={showPwd ? 'text' : 'password'}
-                    value={sync.password}
-                    onChange={e => updateSync({ password: e.target.value })}
-                    autoComplete="off"
-                    style={{ paddingRight: 56 }}
-                  />
-                  <button
-                    className="btn ghost"
-                    style={{ position: 'absolute', right: 2, top: 2, height: 38, padding: '0 10px', fontSize: 12.5 }}
-                    onClick={() => setShowPwd(!showPwd)}
-                  >
-                    {showPwd ? tr('隐藏') : tr('显示')}
+                <p className="field-hint">{tr('在 Azure「应用注册」里创建一个应用得到；重定向 URI 选“移动和桌面应用程序”，填 http://localhost。')}</p>
+                <label className="field-label">{tr('云端目录')}</label>
+                <input className="field mono" value={sync.root} onChange={e => updateSync({ root: e.target.value.trim() || '/Readly' })} spellCheck={false} />
+                <div className="sync-account">
+                  {sync.odRefresh ? (
+                    <span>
+                      <IconCheck style={{ color: 'var(--sage)' }} /> {tr('已登录：{name}', { name: sync.odAccount || 'OneDrive' })}
+                    </span>
+                  ) : (
+                    <span className="muted">{tr('还没有登录')}</span>
+                  )}
+                </div>
+                <div className="btn-row" style={{ marginTop: 6 }}>
+                  {loggingIn ? (
+                    <button className="btn" onClick={() => useStore.getState().cancelOneDriveLogin()}>
+                      {tr('取消登录')}
+                    </button>
+                  ) : sync.odRefresh ? (
+                    <button className="btn" onClick={() => useStore.getState().logoutOneDrive()}>
+                      {tr('退出登录')}
+                    </button>
+                  ) : null}
+                  {!sync.odRefresh && (
+                    <button
+                      className="btn primary"
+                      disabled={!sync.odClientId || loggingIn}
+                      onClick={async () => {
+                        setLoggingIn(true)
+                        await useStore.getState().loginOneDrive(sync.odClientId ?? '')
+                        setLoggingIn(false)
+                      }}
+                    >
+                      {loggingIn ? tr('在浏览器里登录…') : tr('登录 OneDrive')}
+                    </button>
+                  )}
+                  {sync.odRefresh && (
+                    <button className="btn primary" disabled={!sync.enabled || status === 'syncing'} onClick={() => runSync()}>
+                      <IconSync />
+                      {status === 'syncing' ? tr('同步中…') : tr('立即同步')}
+                    </button>
+                  )}
+                </div>
+              </>
+            ) : (
+              <>
+                <label className="field-label">{tr('服务商')}</label>
+                <div className="chips">
+                  {DAV_PRESETS.map(p => (
+                    <button key={p.id} className={`chip ${preset?.id === p.id ? 'on' : ''}`} onClick={() => updateSync({ url: p.url })}>
+                      <span>{tr(p.name)}</span>
+                    </button>
+                  ))}
+                  <button className={`chip ${!preset ? 'on' : ''}`} onClick={() => updateSync({ url: '' })}>
+                    <span>{tr('自定义')}</span>
                   </button>
                 </div>
-              </div>
-            </div>
-            <label className="field-label">{tr('云端目录')}</label>
-            <input className="field mono" value={sync.root} onChange={e => updateSync({ root: e.target.value.trim() || '/Readly' })} spellCheck={false} />
-            <div className="btn-row" style={{ marginTop: 6 }}>
-              <button
-                className="btn"
-                disabled={!configured || testing}
-                onClick={async () => {
-                  setTesting(true)
-                  setTestOk(await testSync())
-                  setTesting(false)
-                }}
-              >
-                {testOk && <IconCheck style={{ color: 'var(--sage)' }} />}
-                {testing ? tr('连接中…') : testOk === false ? tr('连接失败，重试') : tr('测试连接')}
-              </button>
-              <button className="btn primary" disabled={!configured || !sync.enabled || status === 'syncing'} onClick={() => runSync()}>
-                <IconSync />
-                {status === 'syncing' ? tr('同步中…') : tr('立即同步')}
-              </button>
-            </div>
+                <label className="field-label">{tr('服务器地址')}</label>
+                <input
+                  className="field mono"
+                  value={sync.url}
+                  placeholder="https://dav.jianguoyun.com/dav/"
+                  onChange={e => updateSync({ url: e.target.value.trim() })}
+                  autoCapitalize="off"
+                  spellCheck={false}
+                />
+                <div className="grid-2">
+                  <div>
+                    <label className="field-label">{tr('账号')}</label>
+                    <input
+                      className="field"
+                      value={sync.username}
+                      onChange={e => updateSync({ username: e.target.value.trim() })}
+                      autoCapitalize="off"
+                      autoComplete="off"
+                      spellCheck={false}
+                    />
+                  </div>
+                  <div>
+                    <label className="field-label">{tr('密码（应用密码）')}</label>
+                    <div style={{ position: 'relative' }}>
+                      <input
+                        className="field"
+                        type={showPwd ? 'text' : 'password'}
+                        value={sync.password}
+                        onChange={e => updateSync({ password: e.target.value })}
+                        autoComplete="off"
+                        style={{ paddingRight: 56 }}
+                      />
+                      <button
+                        className="btn ghost"
+                        style={{ position: 'absolute', right: 2, top: 2, height: 38, padding: '0 10px', fontSize: 12.5 }}
+                        onClick={() => setShowPwd(!showPwd)}
+                      >
+                        {showPwd ? tr('隐藏') : tr('显示')}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <label className="field-label">{tr('云端目录')}</label>
+                <input className="field mono" value={sync.root} onChange={e => updateSync({ root: e.target.value.trim() || '/Readly' })} spellCheck={false} />
+                <div className="btn-row" style={{ marginTop: 6 }}>
+                  <button
+                    className="btn"
+                    disabled={!configured || testing}
+                    onClick={async () => {
+                      setTesting(true)
+                      setTestOk(await testSync())
+                      setTesting(false)
+                    }}
+                  >
+                    {testOk && <IconCheck style={{ color: 'var(--sage)' }} />}
+                    {testing ? tr('连接中…') : testOk === false ? tr('连接失败，重试') : tr('测试连接')}
+                  </button>
+                  <button className="btn primary" disabled={!configured || !sync.enabled || status === 'syncing'} onClick={() => runSync()}>
+                    <IconSync />
+                    {status === 'syncing' ? tr('同步中…') : tr('立即同步')}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </Card>
 

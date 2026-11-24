@@ -15,6 +15,8 @@ export interface DavEntry {
   etag: string
   lastModified: number
   size: number
+  /** OneDrive：文件指纹（quickXorHash） */
+  hash?: string
 }
 
 type FetchFn = typeof fetch
@@ -36,7 +38,26 @@ export class DavError extends Error {
   }
 }
 
-export class WebDAV {
+/**
+ * 同步用的云端存储：WebDAV 或 OneDrive（见 onedrive.ts）。路径都是“/Readly/devices/x.json.gz”这种形式，
+ * etag 是“内容变了才会变”的版本标记
+ */
+export interface RemoteStore {
+  requests: number
+  propfind(path: string): Promise<DavEntry[] | null>
+  ensureDir(path: string): Promise<void>
+  getBytes(path: string): Promise<Uint8Array | null>
+  getIfChanged(path: string, etag?: string): Promise<{ notModified: true } | { notModified: false; bytes: Uint8Array; etag: string } | null>
+  getBytesProgress(path: string, onProgress: (loaded: number, total: number) => void): Promise<Uint8Array | null>
+  getJSON<T>(path: string): Promise<T | null>
+  put(path: string, data: Uint8Array | string, contentType?: string): Promise<string>
+  putJSON(path: string, data: unknown): Promise<string>
+  remove(path: string): Promise<void>
+  target(path: string): { url: string; auth: string }
+  transferFile(kind: 'upload' | 'download', path: string, file: string, onProgress: (done: number, total: number) => void): Promise<string | number>
+}
+
+export class WebDAV implements RemoteStore {
   private base: string
   private auth: string
   constructor(cfg: WebDAVConfig) {

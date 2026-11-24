@@ -165,6 +165,7 @@ type Bridge2 = {
   setBrightness?(v: number): void
   getExitReasons?(): string
   takeRendererGone?(): string
+  bringToFront?(): void
 }
 const bridge2 = (): Bridge2 | undefined => (window as any).ReadlyAndroid
 
@@ -262,4 +263,19 @@ export async function openUrl(url: string) {
     await invoke('open_url', { url })
   } else if (bridge2()?.openUrl) bridge2()!.openUrl!(url)
   else window.open(url, '_blank', 'noopener')
+}
+
+/** 把 Readly 切回前台（在浏览器里登录完 OneDrive 之后） */
+export async function bringToFront() {
+  try {
+    if (bridge2()?.bringToFront) return bridge2()!.bringToFront!()
+    if (isWindowsApp) {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window')
+      const w = getCurrentWindow()
+      await w.unminimize().catch(() => {})
+      await w.setFocus()
+    }
+  } catch (e) {
+    console.warn('切回前台失败', e)
+  }
 }

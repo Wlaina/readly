@@ -4,12 +4,13 @@ import { isProtected, protect, unprotect } from './secret'
 import type { Annotation, BookRecord, Bookmark, Category, CustomFont, Progress } from './types'
 import { DEFAULT_SETTINGS, mergeSettings, type Settings, type ShelfSort } from './settings'
 import { DEFAULT_SYNC, SyncEngine, type SyncConfig, type SyncMemo } from './sync'
+import { cancelOneDriveLogin, loginOneDrive } from './onedrive'
 import { isTauri, paths, readBytes, readJSON, removeFile, writeBytes, writeJSON } from './storage'
 import { openBook, parseImport } from './book'
 import { endTask, runTask, startTask, updateTask, useTasks } from './tasks'
 import { restoreEpubCover, setEpubCover, setEpubMetadata } from './epubedit'
 import { invalidateCover, loadCover } from './covers'
-import { backgroundPut, createFolderFile, deleteFolderFile, isWindowsApp, writeFolderFile } from './native'
+import { backgroundPut, createFolderFile, deleteFolderFile, isWindowsApp, bringToFront, openUrl, writeFolderFile } from './native'
 import { registerCustomFont, unregisterCustomFont } from './fonts'
 import { dayKey, getDevice, initDevice } from './device'
 import { hashBytes } from './book'
@@ -148,6 +149,11 @@ interface State {
   updateSettings: (fn: (s: Settings) => Settings) => void
   updateSync: (patch: Partial<SyncConfig>) => void
   testSync: () => Promise<boolean>
+  /** 登录 OneDrive（打开浏览器，等你登录完回来），成功后改用 OneDrive 同步 */
+  loginOneDrive: (clientId: string) => Promise<boolean>
+  cancelOneDriveLogin: () => void
+  /** 退出 OneDrive 登录（本机的书和记录都不动） */
+  logoutOneDrive: () => void
   runSync: () => Promise<void>
   /** 快速同步：pull 拉取其他设备进度，push 上传本机记录，both 两者都做 */
   syncQuick: (mode: 'pull' | 'push' | 'both', timeoutMs?: number) => Promise<void>
@@ -180,6 +186,8 @@ let deferredHeavy = false
 /** 正在进行的全量同步任务 */
 let currentSyncTask: string | null = null
 let lastFolderScan = 0
+/** 电脑上 OneDrive 客户端同步的本地文件夹（例如 D:\OneDrive）；OneDrive 同步时，这里面的书直接用 OneDrive 上的那份 */
+let oneDriveRoot: string | null = null
 
 /**
  * 离开阅读页（退出书籍、切后台、关窗口）之前要立刻做完的事：阅读器在这里登记“保存当前进度、结算阅读时长”。
@@ -250,7 +258,10 @@ export const useStore = create<State>((set, get) => {
   // 写盘时把 WebDAV 密码加密（见 lib/secret.ts）；内存里仍是明文
   const persistSync = debounced(async () => {
     const config = get().sync
-    writeJSON(paths.sync, { config: { ...config, password: await protect(config.password) }, state: syncState })
+    writeJSON(paths.sync, {
+      config: { ...config, password: await protect(config.password), odRefresh: config.odRefresh ? await protect(config.odRefresh) : config.odRefresh },
+      state: syncState,
+    })
   }, 300)
 
   /** 从 EPUB 文件里提取封面并保存；没有封面的书也做个标记，不再反复尝试 */
@@ -357,6 +368,28 @@ export const useStore = create<State>((set, get) => {
             await writeBackToFolder(cur, bytes).catch(e => console.warn('写回书籍文件夹失败', e))
         },
         localBookPath: rec => (isTauri ? paths.book(rec.hash, rec.format) : null),
+        saveOneDriveToken: t => {
+          set({ sync: { ...get().sync, odRefresh: t } })
+          persistSync()
+        },
+        cloudFolderFile: rec => {
+          const hit = oneDriveRoot ? folderFileOf(rec, get().folders) : null
+          if (!hit || !rec.folderRef) return null
+          const abs = `${hit.folder.path!.replace(/[\\/]+$/, '')}\\${rec.folderRef.rel.replace(/\//g, '\\')}`
+          const root = oneDriveRoot!.replace(/[\\/]+$/, '')
+          if (!abs.toLowerCase().startsWith(root.toLowerCase() + '\\')) return null
+          return { cloudPath: '/' + abs.slice(root.length + 1).replace(/\\/g, '/'), abs }
+        },
+        bookQuickXor: async rec => (await import('@tauri-apps/api/core')).invoke<string>('book_quickxor', { file: paths.book(rec.hash, rec.format) }),
+        fileQuickXor: async abs => (await import('@tauri-apps/api/core')).invoke<string>('file_quickxor', { path: abs }),
+        adoptFolderFile: async rec => {
+          const hit = folderFileOf(rec, get().folders)
+          if (!hit || !rec.folderRef) return false
+          const bytes = await readFolderEntry(hit.folder, { rel: rec.folderRef.rel, size: 0, mtime: 0 })
+          await get().updateBookFile(rec.hash, bytes, entryName({ rel: rec.folderRef.rel, size: 0, mtime: 0 }), rec.folderRef)
+          const now = get().library.find(b => b.hash === rec.hash)
+          return !!now && (now.fileRevLocal ?? 0) >= (rec.fileRev ?? 0)
+        },
         bookFileWritten: async rec => {
           // 原生层下载好的书：读出来提取封面、写回书籍文件夹（读文件不会卡界面，写才会）
           const cur = get().library.find(b => b.hash === rec.hash)
@@ -391,6 +424,7 @@ export const useStore = create<State>((set, get) => {
 
   const canSync = () => {
     const s = get().sync
+    if (s.provider === 'onedrive') return s.enabled && !!s.odClientId && !!s.odRefresh
     return s.enabled && !!s.url && !!s.username && !!s.password
   }
 
@@ -428,6 +462,8 @@ export const useStore = create<State>((set, get) => {
       syncState = { etags: {}, scanned: {}, ...syncFile.state }
       const storedPassword = syncFile.config?.password ?? ''
       const password = await unprotect(storedPassword)
+      const odRefresh = syncFile.config?.odRefresh ? await unprotect(syncFile.config.odRefresh) : undefined
+      if (isWindowsApp) oneDriveRoot = await import('@tauri-apps/api/core').then(m => m.invoke<string | null>('onedrive_root')).catch(() => null)
       // 冷启动：先把第一屏的封面准备好再显示书架（最多等 0.5 秒），书架出来时不再先是一排灰块、再一张张跳出封面
       if (settings) {
         const first = visibleBooks(library, mergeSettings(settings).shelfSort).filter(b => b.hasCover)
@@ -439,14 +475,14 @@ export const useStore = create<State>((set, get) => {
         library,
         // 没有设置文件 = 第一次启动：显示引导页
         settings: settings ? mergeSettings(settings) : { ...mergeSettings(null), onboarded: false },
-        sync: { ...DEFAULT_SYNC, ...syncFile.config, password },
+        sync: { ...DEFAULT_SYNC, ...syncFile.config, password, ...(syncFile.config?.odRefresh !== undefined ? { odRefresh } : {}) },
         lastSyncAt: syncState.lastSyncAt,
         customFonts: fonts,
       })
       // 在其他设备上删掉的书：同步只带来删除标记，本机的书籍文件和封面还留着，启动后顺手清掉
       setTimeout(() => void purgeDeletedFiles(), 3000)
       // 旧版本留下的明文密码：立刻换成加密存放；解不开时（换了账户/重装）提示重新输入
-      if (storedPassword && !isProtected(storedPassword)) persistSync()
+      if ((storedPassword && !isProtected(storedPassword)) || (syncFile.config?.odRefresh && !isProtected(syncFile.config.odRefresh))) persistSync()
       else if (storedPassword && !password) setTimeout(() => get().showToast(tr('需要重新输入 WebDAV 密码')), 1500)
       // 以前同步下来却没有封面的书：后台慢慢补上
       setTimeout(backfillCovers, 4000)
@@ -1061,7 +1097,30 @@ export const useStore = create<State>((set, get) => {
         invalidateCover(hash)
       }
       const now = Date.now()
+      // 文件指纹（OneDrive 用它核对版本）
+      const qx = isTauri
+        ? await import('@tauri-apps/api/core')
+            .then(m => m.invoke<string>('book_quickxor', { file: paths.book(hash, rec.format) }))
+            .catch(() => '')
+        : ''
+      const latest = get().library.find(b => b.hash === hash) ?? rec
+      // 书籍文件夹里出现的正是其他设备改过、记录里说的那个版本（OneDrive 客户端刚把它下下来）：
+      // 只是把本机补到这个版本，不算本机的修改
+      if (folderRef && qx && latest.fileQx === qx && (latest.fileRev ?? 0) > (latest.fileRevLocal ?? 0)) {
+        patchBook(hash, b => ({
+          ...b,
+          size: bytes.byteLength,
+          hasFile: true,
+          hasCover: b.hasCover || !!parsed.cover,
+          coverRev: parsed.cover ? now : b.coverRev,
+          fileRevLocal: b.fileRev,
+          folderRef: folderRef ?? b.folderRef,
+          updatedAt: now,
+        }))
+        return
+      }
       patchBook(hash, b => ({
+        ...(qx ? { fileQx: qx } : {}),
         ...b,
         // 文件里的书名作者是外部改的：以文件为准
         title: parsed.rec.title,
@@ -1098,10 +1157,51 @@ export const useStore = create<State>((set, get) => {
     updateSync(patch) {
       const prev = get().sync
       set({ sync: { ...prev, ...patch } })
-      if (patch.url !== undefined || patch.root !== undefined || patch.username !== undefined)
+      if (
+        patch.url !== undefined ||
+        patch.root !== undefined ||
+        patch.username !== undefined ||
+        (patch.provider !== undefined && patch.provider !== prev.provider) ||
+        (patch.odAccount !== undefined && patch.odAccount !== prev.odAccount)
+      )
         syncState = { etags: {}, scanned: {} }
       persistSync()
       scheduleAuto()
+    },
+
+    async loginOneDrive(clientId) {
+      const id = clientId.trim()
+      if (!id) return false
+      try {
+        log(tr('正在打开浏览器登录 OneDrive…'))
+        const r = await loginOneDrive(id, url => openUrl(url))
+        get().updateSync({
+          provider: 'onedrive',
+          odClientId: id,
+          odRefresh: r.refreshToken,
+          odAccount: r.account,
+          odSince: get().sync.odSince ?? Date.now(),
+          enabled: true,
+        })
+        log(tr('已登录 OneDrive：{name}', { name: r.account || id }))
+        bringToFront()
+        setTimeout(() => get().runSync(), 300)
+        return true
+      } catch (e) {
+        log(tr('OneDrive 登录失败：{e}', { e: e instanceof Error ? e.message : String(e) }))
+        get().showToast(tr('OneDrive 登录失败：{e}', { e: e instanceof Error ? e.message : String(e) }))
+        bringToFront()
+        return false
+      }
+    },
+
+    cancelOneDriveLogin() {
+      void cancelOneDriveLogin()
+    },
+
+    logoutOneDrive() {
+      get().updateSync({ odRefresh: '', odAccount: '' })
+      log(tr('已退出 OneDrive'))
     },
 
     async testSync() {
